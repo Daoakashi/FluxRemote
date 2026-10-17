@@ -1,0 +1,137 @@
+# Bouton « Publier Flux Remote » : onglet Actions › Publier Flux Remote › Run workflow.
+# Avant : augmentez VERSION dans fluxremote/version.py.
+# Le robot compile Flux Remote pour Windows et pour Linux, publie les archives dans les releases de ce dépôt
+# (tag v1.1.0…), puis demande au site de se mettre à jour (secret SITE_TOKEN, facultatif : sinon le site se met à jour
+# tout seul dans l'heure). Les ordinateurs proposent la mise à jour au prochain démarrage de Flux Remote.
+name: Publier Flux Remote
+
+on:
+  workflow_dispatch:
+    inputs:
+      notes:
+        description: "Nouveautés de cette version (affichées dans Flux Remote et sur le site)"
+        required: true
+        type: string
+      obligatoire:
+        description: "Mise à jour indispensable"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(python3 -c "import re;print(re.search(r'VERSION = \"([^\"]+)\"', open('fluxremote/version.py').read()).group(1))")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo "::error::Flux Remote $version est déjà publiée. Augmentez VERSION dans fluxremote/version.py."
+            exit 1
+          fi
+
+  compiler:
+    needs: version
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-22.04]  # Ubuntu 22.04 : compatible Linux Mint 21 et plus récent
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Dépendances
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Bibliothèques système (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxcb-cursor0 libegl1
+      - name: Compiler
+        run: python construire.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paquet-${{ runner.os }}
+          path: dist/FluxRemote-*.zip
+          if-no-files-found: error
+
+  publier:
+    needs: [version, compiler]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: paquets
+          merge-multiple: true
+      - name: "Archive des sources (lancement avec Python, installer.bat ou installer.sh)"
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import os, zipfile
+          v = os.environ["VERSION"]
+          exclus = {"dist", "build", "venv", "__pycache__", ".git", ".github", "paquets"}
+          with zipfile.ZipFile(f"paquets/FluxRemote-{v}-sources.zip", "w", zipfile.ZIP_DEFLATED) as z:
+              for d, sous, fichiers in os.walk("."):
+                  sous[:] = [s for s in sous if s not in exclus]
+                  for f in fichiers:
+                      if f in (".gitattributes", ".gitignore"):
+                          continue
+                      chemin = os.path.join(d, f)
+                      info = zipfile.ZipInfo.from_file(chemin, os.path.join("FluxRemote", os.path.relpath(chemin, ".")))
+                      if f.endswith(".sh"):
+                          info.external_attr = 0o100755 << 16
+                      with open(chemin, "rb") as src:
+                          z.writestr(info, src.read(), zipfile.ZIP_DEFLATED)
+          PY
+
+      - name: Préparer version.json
+        env:
+          NOTES: ${{ inputs.notes }}
+          OBLIGATOIRE: ${{ inputs.obligatoire }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          v, depot = os.environ["VERSION"], os.environ["GITHUB_REPOSITORY"]
+          base = f"https://github.com/{depot}/releases/download/v{v}/"
+          def paquet(nom):
+              chemin = os.path.join("paquets", nom)
+              return {"url": base + nom, "sha256": hashlib.sha256(open(chemin, "rb").read()).hexdigest(),
+                      "taille": os.path.getsize(chemin)}
+          d = {"version": v, "notes": os.environ.get("NOTES", "").strip(),
+               "obligatoire": os.environ.get("OBLIGATOIRE") == "true",
+               "windows": paquet(f"FluxRemote-{v}-windows.zip"), "linux": paquet(f"FluxRemote-{v}-linux.zip"),
+               "sources": paquet(f"FluxRemote-{v}-sources.zip")}
+          json.dump(d, open("paquets/version.json", "w"), indent=2, ensure_ascii=False)
+          print(json.dumps(d, indent=2, ensure_ascii=False))
+          PY
+      - name: Publier la version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NOTES: ${{ inputs.notes }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "v$VERSION" paquets/*.zip paquets/version.json \
+            --title "Flux Remote $VERSION" --notes "$NOTES" --target "$GITHUB_SHA"
+
+      - name: Mettre le site à jour
+        env:
+          GH_TOKEN: ${{ secrets.SITE_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::notice::Pas de secret SITE_TOKEN : le site prendra la nouvelle version tout seul dans l'heure."
+          else
+            gh workflow run site.yml --repo Daoakashi/flux-web \
+              || echo "::warning::Le site n'a pas pu être relancé : il se mettra à jour tout seul dans l'heure."
+          fi

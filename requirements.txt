@@ -1,0 +1,3 @@
+# Flux Remote — bibliothèques gratuites, utilisables dans un logiciel vendu (voir LICENCES-TIERCES.md)
+PySide6-Essentials>=6.7      # interface Qt (LGPL v3)
+cryptography>=42             # vérification de la clé du serveur (Apache 2.0 / BSD)
