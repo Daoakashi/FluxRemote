@@ -41,6 +41,7 @@ jobs:
   compiler:
     needs: version
     strategy:
+      fail-fast: false   # une erreur sous Linux n'annule pas la compilation Windows (et inversement)
       matrix:
         os: [windows-latest, ubuntu-22.04]  # Ubuntu 22.04 : compatible Linux Mint 21 et plus récent
     runs-on: ${{ matrix.os }}

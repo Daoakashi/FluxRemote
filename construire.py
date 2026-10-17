@@ -32,8 +32,8 @@ PyInstaller.__main__.run([
     "--exclude-module", "tkinter",
 ])
 dossier = os.path.join(ICI, "dist", "FluxRemote")
-for f in ("LICENCES-TIERCES.md", "LISEZMOI.md"):
-    shutil.copy(os.path.join(ICI, f), dossier)
+for source, nom in (("LICENCES-TIERCES.md", "LICENCES-TIERCES.md"), ("README.md", "LISEZMOI.md")):
+    shutil.copy(os.path.join(ICI, source), os.path.join(dossier, nom))
 archive = os.path.join(ICI, "dist", f"FluxRemote-{VERSION}-{plateforme}.zip")
 with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
     for d, _, fichiers in os.walk(dossier):
