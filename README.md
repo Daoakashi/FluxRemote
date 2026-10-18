@@ -21,6 +21,17 @@ Relancer l'installateur répare l'installation sans rien perdre. Si une mise à 
 
 Au premier lancement, Windows peut afficher « Windows a protégé votre ordinateur », car le programme n'est pas encore signé par un certificat payant. Cliquez sur « Informations complémentaires » puis « Exécuter quand même ».
 
+## Plusieurs PC Flux
+
+Flux Remote peut suivre plusieurs PC Flux à la fois, par exemple un directeur et tous ses établissements.
+
+- **Ajouter un serveur** : Tableau de bord, Compte ou Réglages › Serveurs Flux. Même démarche que pour le premier.
+  - Si votre responsable a transféré votre compte (Flux › FluxLite › Transférer), connectez-vous avec le même mail et le même mot de passe.
+  - Sinon, « Créer mon compte sur ce serveur avec mes informations » reprend vos nom, prénom, mail et société.
+- **Caméras, Tableau de bord et Journal** : tout est regroupé, avec le nom du serveur. Le bouton « Tous les serveurs » permet de n'en afficher qu'un ou quelques-uns.
+- **Contrôle** : choisissez le serveur à piloter. « Appliquer aussi aux autres serveurs » envoie le même réglage partout : détection, niveau de scan, délais, notifications.
+- **Compte** : chaque serveur garde ses propres comptes, droits et sessions.
+
 ## Se connecter
 
 1. Dans Flux, page **FluxLite** : activez le serveur, puis cliquez sur **Copier le lien pour Flux Remote**.
@@ -58,3 +69,8 @@ Flux Remote vérifie au démarrage le fichier https://daoakashi.github.io/flux-w
 - Compiler : `pip install pyinstaller`, puis `python construire.py`.
 - Publier : augmentez `VERSION` dans `fluxremote/version.py`, puis lancez **Actions › Publier Flux Remote** dans ce dépôt. Le robot compile pour Windows et Linux, publie les archives dans les *Releases* de ce dépôt (tag `v1.1.0`…), puis le site recopie leur `version.json` (tout de suite avec le secret facultatif `SITE_TOKEN`, sinon dans l'heure).
 - Dépôts liés : [Flux](https://github.com/Daoakashi/Flux) (le serveur, sur le PC des caméras) et [flux-web](https://github.com/Daoakashi/flux-web) (le site et le relais).
+
+## Licence, juridique et IA
+
+Flux Remote est un logiciel libre de DMS Security sous licence GNU AGPL-3.0 (`LICENSE`), sans garantie. Il a été conçu et développé avec l'aide d'outils d'intelligence artificielle, sous la direction et la vérification de son auteur. Textes juridiques : dossier [`juridique/`](juridique/LISEZMOI.md). Feedback : bouton dans le programme, ou dms.security.list@gmail.com.
+

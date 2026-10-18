@@ -1,6 +1,10 @@
 """Réglages de Flux Remote, rangés dans le dossier de l'utilisateur (jamais à côté du programme).
 
-Le jeton de session est protégé : sous Windows par DPAPI (lié au compte Windows, illisible depuis un autre compte ou
+Plusieurs PC Flux peuvent être reliés (« serveurs ») : chacun garde sa clé, son adresse et sa propre session. Les
+champs hote, cle, jeton… servent seulement pendant l'appairage ou la connexion d'un serveur, avant qu'il rejoigne
+la liste.
+
+Les jetons de session sont protégés : sous Windows par DPAPI (lié au compte Windows, illisible depuis un autre compte ou
 un autre PC), sous Linux par un fichier lisible seulement par l'utilisateur.
 """
 import base64
@@ -20,6 +24,9 @@ DEFAUTS = {
     "hote": "", "hotes": [], "port": 47810, "cle": "", "nom_serveur": "", "jeton": "", "cgu": "",
     # accès par Internet : relais propre à ce PC Flux (vide = celui du site), adresse du site gardée en mémoire
     "relais": "", "relais.site": "",
+    # PC Flux reliés : [{cle, nom, hote, hotes, port, relais, jeton, cgu, affiche}] ; serveur choisi pour le
+    # contrôle et le compte
+    "serveurs": [], "serveur.courant": "",
     # apparence (mêmes clés que Flux : le thème est partagé)
     "apparence.theme": "sombre", "apparence.accent": "#2F7BFF", "apparence.police": "systeme",
     "apparence.taille_police": 13, "apparence.arrondi": 10, "apparence.densite": "normale",
@@ -93,8 +100,21 @@ class Reglages:
                     if k in DEFAUTS:
                         self._v[k] = v
                 self._v["jeton"] = _lire_protege(lu.get("jeton", ""))
+                self._v["serveurs"] = [dict(x, jeton=_lire_protege(x.get("jeton", "")))
+                                       for x in lu.get("serveurs") or [] if isinstance(x, dict) and x.get("cle")]
+                if not self._v["serveurs"] and lu.get("cle"):  # Flux Remote 1.1 : un seul serveur
+                    self._v["serveurs"] = [{"cle": lu["cle"], "nom": lu.get("nom_serveur", ""),
+                                            "hote": lu.get("hote", ""), "hotes": lu.get("hotes") or [],
+                                            "port": lu.get("port", 47810), "relais": lu.get("relais", ""),
+                                            "jeton": self._v["jeton"], "cgu": lu.get("cgu", ""), "affiche": True}]
+                    self._v["muettes_migrees"] = lu["cle"]
+                    self._v.update(hote="", hotes=[], cle="", nom_serveur="", jeton="", relais="", cgu="")
         except (OSError, ValueError):
             pass
+        cle_migree = self._v.pop("muettes_migrees", None)
+        if cle_migree:  # identifiants de caméras de la 1.1 : préfixés par la clé de leur serveur
+            for k in ("cameras.masquees", "alertes.muettes"):
+                self._v[k] = [i if "|" in i else f"{cle_migree}|{i}" for i in self._v.get(k, [])]
 
     def get(self, cle, defaut=None):
         with self._lock:
@@ -127,6 +147,7 @@ class Reglages:
         with self._lock:
             d = dict(self._v)
         d["jeton"] = _proteger(d.get("jeton", ""))
+        d["serveurs"] = [dict(x, jeton=_proteger(x.get("jeton", ""))) for x in d.get("serveurs") or []]
         os.makedirs(DOSSIER, exist_ok=True)
         tmp = self.chemin + ".tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -135,7 +156,8 @@ class Reglages:
         os.replace(tmp, self.chemin)
 
     def oublier_serveur(self):
-        self.maj(hote="", hotes=[], cle="", nom_serveur="", jeton="", relais="", **{"cameras.masquees": [], "alertes.muettes": []})
+        """Vide les champs d'appairage (le serveur en cours d'ajout ou de connexion)."""
+        self.maj(hote="", hotes=[], cle="", nom_serveur="", jeton="", relais="", cgu="")
 
 
 def dossier_programme():

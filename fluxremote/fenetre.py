@@ -1,4 +1,8 @@
-"""Fenêtre principale de Flux Remote : tableau de bord, caméras, contrôle, journal, compte et réglages."""
+"""Fenêtre principale de Flux Remote : tableau de bord, caméras, contrôle, journal, compte et réglages.
+
+Plusieurs PC Flux peuvent être reliés en même temps : leurs caméras, leurs alertes et leur journal sont regroupés
+(avec le nom du serveur), et le contrôle et le compte se règlent serveur par serveur.
+"""
 import csv
 import os
 import sys
@@ -9,7 +13,7 @@ from datetime import datetime
 
 from PySide6.QtCore import QRectF, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog, QDoubleSpinBox,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QScrollArea, QStackedWidget,
                                QStatusBar, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
@@ -18,6 +22,7 @@ from . import api as module_api
 from . import maj, systeme, theme
 from .alertes import Ecoute
 from .connexion import Accueil, force_mdp, html_cgu, mdp_accepte
+from .serveurs import Serveur
 from .taches import Tache
 from .theme import C, T, couleur, dessiner_logo
 from .version import SITE, VERSION
@@ -93,6 +98,17 @@ def titre_page(texte, sous=None):
     return w
 
 
+def vider(layout):
+    while layout.count():
+        it = layout.takeAt(0)
+        w = it.widget()
+        if w is not None:
+            w.setParent(None)
+            w.deleteLater()
+        elif it.layout() is not None:
+            vider(it.layout())
+
+
 # ---------------------------------------------------------------------------------------------------
 # Son d'alerte : deux notes courtes, générées une fois (aucun fichier à fournir)
 # ---------------------------------------------------------------------------------------------------
@@ -140,7 +156,9 @@ class FenetreVideo(QWidget):
     def __init__(self, fen, cam):
         super().__init__(None, Qt.WindowType.Window)
         self.fen, self.cam = fen, cam
-        self.setWindowTitle(f"{cam['nom']} · Flux Remote")
+        self.srv = fen.serveur_de(cam)
+        nom = cam["nom"] + (f" · {self.srv.nom}" if fen.plusieurs() else "")
+        self.setWindowTitle(f"{nom} · Flux Remote")
         self.setWindowIcon(fen.windowIcon())
         self.setObjectName("fond")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -150,7 +168,7 @@ class FenetreVideo(QWidget):
         barre = QHBoxLayout()
         self.voyant = Voyant(12)
         barre.addWidget(self.voyant)
-        self.lbl = QLabel(cam["nom"])
+        self.lbl = QLabel(nom)
         self.lbl.setObjectName("titre")
         barre.addWidget(self.lbl)
         self.lbl_etat = etiquette("", "soustitre", False)
@@ -158,12 +176,12 @@ class FenetreVideo(QWidget):
         self.b_detection = Bouton("Détection", "discret", "controle")
         self.b_detection.setToolTip("Activer ou couper la détection de cette caméra sur le PC Flux")
         self.b_detection.clicked.connect(lambda: fen.piloter("camera.detection", not self.cam.get("detection", True),
-                                                              self.cam["id"]))
+                                                              self.cam["id"], self.srv))
         self.b_clip = Bouton("Vidéo sur le PC", "discret", "video")
         self.b_clip.setToolTip("Enregistre une courte vidéo sur le PC Flux (avec les secondes précédentes)")
-        self.b_clip.clicked.connect(lambda: fen.piloter("camera.clip", True, self.cam["id"]))
+        self.b_clip.clicked.connect(lambda: fen.piloter("camera.clip", True, self.cam["id"], self.srv))
         for b in (self.b_detection, self.b_clip):
-            b.setVisible(fen.pilotage_autorise)
+            b.setVisible(self.srv.pilotage_autorise)
             barre.addWidget(b)
         b_cap = Bouton("Capture", "discret", "capture")
         b_cap.clicked.connect(self.capture)
@@ -186,7 +204,7 @@ class FenetreVideo(QWidget):
         QShortcut(QKeySequence("Escape"), self, activated=lambda: self.isFullScreen() and self.showNormal())
         QShortcut(QKeySequence("Ctrl+S"), self, activated=self.capture)
         self.derniere = None
-        self.lecteur = LecteurFlux(fen.api, cam["id"], 15, 1600)
+        self.lecteur = LecteurFlux(self.srv.api, cam["id"], 15, 1600)
         self.lecteur.image.connect(self._image)
         self.lecteur.etat.connect(lambda t: self.lbl_etat.setText(t))
         self.lecteur.demarrer()
@@ -222,8 +240,30 @@ class FenetreVideo(QWidget):
 
     def closeEvent(self, e):
         self.lecteur.arreter()
-        self.fen.videos.pop(self.cam["id"], None)
+        self.fen.videos.pop(self.cam["uid"], None)
         super().closeEvent(e)
+
+
+def menu_serveurs(fen, bouton, apres):
+    """Menu « Serveurs affichés » : tous, un ou plusieurs."""
+    m = QMenu(bouton)
+    actifs = fen.serveurs_actifs()
+    tous = all(s.affiche for s in actifs)
+    a = m.addAction("Tous les serveurs")
+    a.setCheckable(True)
+    a.setChecked(tous)
+    a.triggered.connect(lambda: (fen.afficher_serveurs([s.cle for s in actifs]), apres()))
+    m.addSeparator()
+    for s in actifs:
+        a = m.addAction(s.nom)
+        a.setCheckable(True)
+        a.setChecked(s.affiche)
+        a.triggered.connect(lambda _=False, s=s: (fen.basculer_affichage(s), apres()))
+    m.addSeparator()
+    m.addAction("Seulement…").setEnabled(False)
+    for s in actifs:
+        m.addAction(f"  {s.nom} seul", lambda s=s: (fen.afficher_serveurs([s.cle]), apres()))
+    m.exec(bouton.mapToGlobal(bouton.rect().bottomLeft()))
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -233,6 +273,7 @@ class PageTableau(QWidget):
     def __init__(self, fen):
         super().__init__()
         self.fen = fen
+        self.lignes_srv = {}
         racine = QVBoxLayout(self)
         racine.setContentsMargins(0, 0, 0, 0)
         self.tete = titre_page("Tableau de bord", "")
@@ -251,29 +292,27 @@ class PageTableau(QWidget):
             v.addWidget(etiquette(lib, "soustitre"))
             self.chiffres[cle] = n
             g.addWidget(f, 0, i)
-        # détection
-        f, v = carte("Détection sur le PC Flux")
-        h = QHBoxLayout()
-        self.voyant_det = Voyant(16)
-        h.addWidget(self.voyant_det)
-        self.lbl_det = QLabel("…")
-        self.lbl_det.setStyleSheet(f"font-size: {T.taille + 4}px; font-weight: 600;")
-        h.addWidget(self.lbl_det, 1)
-        self.inter_det = Interrupteur()
-        self.inter_det.toggled.connect(lambda e: fen.piloter("detection.actif", bool(e)))
-        h.addWidget(self.inter_det)
-        v.addLayout(h)
-        self.lbl_niveau = etiquette("")
-        v.addWidget(self.lbl_niveau)
+        # serveurs et détection
+        f, v = carte("Serveurs Flux")
+        self.v_srv = QVBoxLayout()
+        self.v_srv.setSpacing(4)
+        v.addLayout(self.v_srv)
         self.lbl_pilotage = etiquette("")
         v.addWidget(self.lbl_pilotage)
+        h = QHBoxLayout()
+        b = Bouton("Ajouter un serveur", "fantome", "plus")
+        b.clicked.connect(fen.ajouter_serveur)
+        h.addWidget(b)
+        h.addStretch(1)
+        v.addLayout(h)
+        v.addStretch(1)
         g.addWidget(f, 1, 0, 1, 2)
         # actions rapides
         f, v = carte("Actions rapides")
         self.b_pause = Bouton("Pause des alertes sur ce PC (1 h)", "discret", "cloche_barree")
         self.b_pause.clicked.connect(lambda: fen.pause_alertes(1))
         self.b_tout = Bouton("Couper détection et notifications", "danger", "pause")
-        self.b_tout.setToolTip("Mode discret : coupe la détection et toutes les notifications de Flux")
+        self.b_tout.setToolTip("Mode discret : coupe la détection et toutes les notifications des PC Flux affichés")
         self.b_tout.clicked.connect(self._tout_couper)
         self.b_reprendre = Bouton("Tout réactiver", "primaire", "lecture")
         self.b_reprendre.clicked.connect(self._tout_reprendre)
@@ -283,85 +322,116 @@ class PageTableau(QWidget):
             v.addWidget(b)
         v.addStretch(1)
         g.addWidget(f, 1, 2, 1, 2)
-        # serveur
-        f, v = carte("Serveur")
-        self.lbl_serveur = etiquette("", "aide")
-        v.addWidget(self.lbl_serveur)
-        v.addStretch(1)
-        g.addWidget(f, 2, 0, 1, 2)
         # dernières alertes
         f, v = carte("Dernières alertes")
-        self.liste = QTableWidget(0, 3)
-        self.liste.setHorizontalHeaderLabels(["Heure", "Caméra", "Alerte"])
+        self.liste = QTableWidget(0, 4)
+        self.liste.setHorizontalHeaderLabels(["Heure", "Caméra", "Serveur", "Alerte"])
         self.liste.verticalHeader().setVisible(False)
         self.liste.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.liste.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.liste.setShowGrid(False)
-        self.liste.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.liste.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.liste.setMinimumHeight(220)
         self.liste.cellDoubleClicked.connect(lambda *_: fen.aller("journal"))
         v.addWidget(self.liste)
-        g.addWidget(f, 2, 2, 1, 2)
+        g.addWidget(f, 2, 0, 1, 4)
         for c in range(4):
             g.setColumnStretch(c, 1)
         g.setRowStretch(3, 1)
         racine.addWidget(defilant(contenu), 1)
 
     def _tout_couper(self):
-        if QMessageBox.question(self, "Mode discret", "Couper la détection de toutes les caméras et toutes les "
-                                "notifications du PC Flux ?") != QMessageBox.StandardButton.Yes:
+        cibles = [s for s in self.fen.affiches() if s.pilotage_autorise]
+        if not cibles or QMessageBox.question(
+                self, "Mode discret", "Couper la détection de toutes les caméras et toutes les notifications sur "
+                f"{'les ' + str(len(cibles)) + ' PC Flux affichés' if len(cibles) > 1 else 'le PC Flux'} ?") \
+                != QMessageBox.StandardButton.Yes:
             return
-        self.fen.piloter("detection.actif", False)
-        self.fen.piloter("notif.actif", False)
-        if any(c["cle"] == "mail.actif" and c["actif"] for c in (self.fen.etat_pilotage or {}).get("canaux", [])):
-            self.fen.piloter("mail.actif", False)
+        for s in cibles:
+            self.fen.piloter("detection.actif", False, srv=s)
+            self.fen.piloter("notif.actif", False, srv=s)
+            if any(c["cle"] == "mail.actif" and c["actif"] for c in (s.etat_pilotage or {}).get("canaux", [])):
+                self.fen.piloter("mail.actif", False, srv=s)
 
     def _tout_reprendre(self):
-        self.fen.piloter("detection.actif", True)
-        self.fen.piloter("notif.actif", True)
+        for s in self.fen.affiches():
+            if s.pilotage_autorise:
+                self.fen.piloter("detection.actif", True, srv=s)
+                self.fen.piloter("notif.actif", True, srv=s)
+
+    def _lignes_serveurs(self):
+        fen = self.fen
+        actifs = fen.serveurs_actifs()
+        if [s.cle for s in actifs] != list(self.lignes_srv):
+            vider(self.v_srv)
+            self.lignes_srv = {}
+            for s in actifs:
+                w = QWidget()
+                h = QHBoxLayout(w)
+                h.setContentsMargins(0, 4, 0, 4)
+                voy = Voyant(12)
+                h.addWidget(voy)
+                lab = QLabel(s.nom)
+                lab.setStyleSheet("font-weight: 600;")
+                h.addWidget(lab)
+                info = etiquette("", "aide", False)
+                h.addWidget(info, 1)
+                h.addWidget(etiquette("Détection", "aide", False))
+                inter = Interrupteur()
+                inter.toggled.connect(lambda e, s=s: fen.piloter("detection.actif", bool(e), srv=s))
+                h.addWidget(inter)
+                self.v_srv.addWidget(w)
+                self.lignes_srv[s.cle] = {"voyant": voy, "nom": lab, "info": info, "inter": inter, "widget": w}
+        for s in actifs:
+            l_ = self.lignes_srv[s.cle]
+            cams = s.cameras
+            l_["voyant"].regler(("direct" if s.detection_globale else "chargement") if s.en_ligne else "arret")
+            l_["nom"].setText(s.nom)
+            l_["info"].setText(
+                (f"{sum(1 for c in cams if c['etat'] in ('direct', 'alerte'))}/{len(cams)} caméras · {s.texte_route()}"
+                 if s.en_ligne else "connexion perdue, nouvelle tentative…")
+                + ("" if s.affiche else " · masqué"))
+            l_["inter"].blockSignals(True)
+            l_["inter"].regler(s.detection_globale)
+            l_["inter"].blockSignals(False)
+            l_["inter"].setEnabled(s.pilotage_autorise)
+            l_["inter"].setToolTip("" if s.pilotage_autorise else "Votre compte peut voir mais pas piloter ce PC Flux.")
 
     def rafraichir(self):
         fen = self.fen
         cams = fen.cameras
-        self.tete.sous.setText(f"{fen.reg['nom_serveur'] or 'Flux'} · {fen.profil.get('prenom', '')} "
-                               f"{fen.profil.get('nom', '')}".strip())
+        p = fen.profil_connu()
+        n = len(fen.affiches())
+        self.tete.sous.setText(" · ".join(x for x in (
+            f"{n} serveurs" if n > 1 else (fen.affiches()[0].nom if n else "Flux"),
+            f"{p.get('prenom', '')} {p.get('nom', '')}".strip()) if x))
         self.chiffres["direct"].setText(f"{sum(1 for c in cams if c['etat'] in ('direct', 'alerte'))} / {len(cams)}")
         self.chiffres["presences"].setText(str(sum(c.get("personnes", 0) for c in cams)))
         aujourd = [e for e in fen.dernieres_alertes if datetime.fromtimestamp(e["heure"]).date() == datetime.now().date()]
         self.chiffres["alertes"].setText(str(len(aujourd)) if fen.journal_charge else "—")
-        e = fen.etat_pilotage
-        self.chiffres["connus"].setText(str(e["statistiques"]["personnes"]) if e and e.get("statistiques") else "—")
-        det = fen.detection_globale
-        self.voyant_det.regler("direct" if det else "chargement")
-        self.lbl_det.setText("Active sur le PC Flux" if det else "En pause : images visibles, aucune alerte")
-        self.inter_det.regler(det)
-        self.inter_det.setEnabled(fen.pilotage_autorise)
-        if e and e.get("niveau"):
-            n = next((x for x in e.get("niveaux", []) if x["cle"] == e["niveau"]), None)
-            self.lbl_niveau.setText(f"Niveau de scan : {n['nom'] if n else e['niveau']}"
-                                    + (f" · calcul : {e['calcul']}" if e.get("calcul") else ""))
-        self.lbl_pilotage.setText("" if fen.pilotage_autorise else
-                                  "Votre compte peut voir mais pas piloter. Le responsable du PC Flux peut vous accorder "
-                                  "le droit « pilotage à distance ».")
+        stats = [s.etat_pilotage["statistiques"]["personnes"] for s in fen.affiches()
+                 if s.etat_pilotage and s.etat_pilotage.get("statistiques")]
+        self.chiffres["connus"].setText(str(sum(stats)) if stats else "—")
+        self._lignes_serveurs()
+        pilotables = any(s.pilotage_autorise for s in fen.affiches())
+        self.lbl_pilotage.setText("" if all(s.pilotage_autorise for s in fen.serveurs_actifs()) else
+                                  "Sur certains serveurs, votre compte peut voir mais pas piloter. Leur responsable "
+                                  "peut vous accorder le droit « pilotage à distance ».")
         for b in (self.b_tout, self.b_reprendre):
-            b.setVisible(fen.pilotage_autorise)
-        i = fen.info or {}
-        self.lbl_serveur.setText(
-            f"Nom : {i.get('nom') or fen.reg['nom_serveur']}\nChemin : {fen.texte_route()}\n"
-            f"Version de Flux : {i.get('version_flux') or '—'}\n"
-            f"Clé : {module_api.formater_cle(fen.reg['cle'])}\n"
-            f"Connexion : {'chiffrée, clé vérifiée' if fen.en_ligne else 'perdue, nouvelle tentative…'}")
+            b.setVisible(pilotables)
+        alertes = fen.dernieres_alertes[:12]
+        self.liste.setColumnHidden(2, not fen.plusieurs())
         self.liste.setRowCount(0)
-        for ev in fen.dernieres_alertes[:12]:
+        for ev in alertes:
             r = self.liste.rowCount()
             self.liste.insertRow(r)
-            for j, val in enumerate((heure(ev["heure"]), ev["camera"], ev["texte"])):
+            for j, val in enumerate((heure(ev["heure"]), ev["camera"], ev.get("serveur", ""), ev["texte"])):
                 it = QTableWidgetItem(val)
                 if ev.get("prioritaire"):
                     it.setForeground(couleur("liste_noire"))
                 self.liste.setItem(r, j, it)
-        self.liste.resizeColumnToContents(0)
-        self.liste.resizeColumnToContents(1)
+        for c in (0, 1, 2):
+            self.liste.resizeColumnToContents(c)
 
 
 class Tuile(QFrame):
@@ -383,11 +453,16 @@ class Tuile(QFrame):
         h.setContentsMargins(4, 0, 0, 0)
         self.voyant = Voyant(10)
         h.addWidget(self.voyant)
+        noms = QVBoxLayout()
+        noms.setSpacing(0)
         self.lbl = QLabel(cam["nom"])
         self.lbl.setStyleSheet("font-weight: 600;")
-        h.addWidget(self.lbl, 1)
+        noms.addWidget(self.lbl)
+        self.lbl_srv = etiquette("", "aide", False)
+        noms.addWidget(self.lbl_srv)
+        h.addLayout(noms, 1)
         self.b_cloche = Bouton("", "fantome", "cloche")
-        self.b_cloche.clicked.connect(lambda: self.fen.basculer_muette(self.cam["id"]))
+        self.b_cloche.clicked.connect(lambda: self.fen.basculer_muette(self.cam["uid"]))
         b_grand = Bouton("", "fantome", "plein_ecran")
         b_grand.setToolTip("Ouvrir en grand")
         b_grand.clicked.connect(lambda: self.fen.ouvrir_video(self.cam))
@@ -404,31 +479,37 @@ class Tuile(QFrame):
 
     def maj(self, cam):
         self.cam = cam
+        srv = self.fen.serveur_de(cam)
         self.vue.etat, self.vue.personnes = cam["etat"], cam.get("personnes", 0)
-        self.vue.detection = cam.get("detection", True) and self.fen.detection_globale
+        self.vue.detection = cam.get("detection", True) and (srv.detection_globale if srv else True)
         self.vue.badges = [cam["resolution"]] if cam.get("resolution") and self.page.colonnes_effectives() <= 2 else []
         self.voyant.regler(cam["etat"])
-        muette = cam["id"] in self.fen.reg["alertes.muettes"]
+        self.lbl_srv.setText(cam.get("serveur", "") if self.fen.plusieurs() else "")
+        self.lbl_srv.setVisible(self.fen.plusieurs())
+        muette = cam["uid"] in self.fen.reg["alertes.muettes"]
         self.b_cloche.definir_icone("cloche_barree" if muette else "cloche")
         self.b_cloche.setToolTip("Alertes de cette caméra coupées sur ce PC" if muette else
                                  "Couper les alertes de cette caméra sur ce PC")
         self.vue.update()
 
     def _menu(self):
+        srv = self.fen.serveur_de(self.cam)
         m = QMenu(self)
         m.addAction("Ouvrir en grand", lambda: self.fen.ouvrir_video(self.cam))
-        if self.fen.pilotage_autorise:
+        if srv is not None and srv.pilotage_autorise:
             m.addSeparator()
             en_marche = self.cam["etat"] != "arret"
             m.addAction("Arrêter la caméra sur le PC" if en_marche else "Démarrer la caméra sur le PC",
-                        lambda: self.fen.piloter("camera.marche", not en_marche, self.cam["id"]))
+                        lambda: self.fen.piloter("camera.marche", not en_marche, self.cam["id"], srv))
             m.addAction("Couper la détection" if self.cam.get("detection", True) else "Activer la détection",
-                        lambda: self.fen.piloter("camera.detection", not self.cam.get("detection", True), self.cam["id"]))
-            a = m.addAction("Enregistrer une vidéo sur le PC", lambda: self.fen.piloter("camera.clip", True, self.cam["id"]))
+                        lambda: self.fen.piloter("camera.detection", not self.cam.get("detection", True),
+                                                 self.cam["id"], srv))
+            a = m.addAction("Enregistrer une vidéo sur le PC",
+                            lambda: self.fen.piloter("camera.clip", True, self.cam["id"], srv))
             a.setEnabled(en_marche)
         m.addSeparator()
         m.addAction("Voir son journal", lambda: self.fen.journal_camera(self.cam))
-        m.addAction("Masquer de la grille", lambda: self.page.masquer(self.cam["id"], True))
+        m.addAction("Masquer de la grille", lambda: self.page.masquer(self.cam["uid"], True))
         m.exec(self.b_menu.mapToGlobal(self.b_menu.rect().bottomLeft()))
 
 
@@ -437,11 +518,15 @@ class PageCameras(QWidget):
         super().__init__()
         self.fen = fen
         self.tuiles = {}
-        self.vignettes = None
+        self.vignettes = {}  # clé du serveur -> Vignettes (une connexion à la fois par serveur)
         racine = QVBoxLayout(self)
         racine.setContentsMargins(0, 0, 0, 0)
         haut = QHBoxLayout()
         haut.addWidget(titre_page("Caméras"), 1)
+        self.b_serveurs = Bouton("Tous les serveurs", "discret", "reseau")
+        self.b_serveurs.setToolTip("Choisir les PC Flux dont les caméras s'affichent")
+        self.b_serveurs.clicked.connect(lambda: menu_serveurs(fen, self.b_serveurs, fen.serveurs_changes))
+        haut.addWidget(self.b_serveurs)
         self.combo_col = QComboBox()
         for n, lib in ((0, "Disposition automatique"), (1, "1 colonne"), (2, "2 colonnes"), (3, "3 colonnes"),
                        (4, "4 colonnes")):
@@ -470,27 +555,34 @@ class PageCameras(QWidget):
 
     def visibles(self):
         masquees = set(self.fen.reg["cameras.masquees"])
-        return [c for c in self.fen.cameras if c["id"] not in masquees]
+        return [c for c in self.fen.cameras if c["uid"] not in masquees]
 
     def _colonnes(self):
         self.fen.reg.set("cameras.colonnes", self.combo_col.currentData())
         self.reconstruire()
 
-    def masquer(self, cam_id, masquee):
+    def masquer(self, uid, masquee):
         s = set(self.fen.reg["cameras.masquees"])
-        s.add(cam_id) if masquee else s.discard(cam_id)
+        s.add(uid) if masquee else s.discard(uid)
         self.fen.reg.set("cameras.masquees", sorted(s))
         self.reconstruire()
 
     def _menu_masquees(self):
-        masquees = [c for c in self.fen.cameras if c["id"] in set(self.fen.reg["cameras.masquees"])]
+        masquees = [c for c in self.fen.cameras if c["uid"] in set(self.fen.reg["cameras.masquees"])]
         m = QMenu(self)
         if not masquees:
             a = m.addAction("Aucune caméra masquée")
             a.setEnabled(False)
         for c in masquees:
-            m.addAction(f"Afficher « {c['nom']} »", lambda i=c["id"]: self.masquer(i, False))
+            nom = c["nom"] + (f" · {c['serveur']}" if self.fen.plusieurs() else "")
+            m.addAction(f"Afficher « {nom} »", lambda i=c["uid"]: self.masquer(i, False))
         m.exec(self.b_masquees.mapToGlobal(self.b_masquees.rect().bottomLeft()))
+
+    def _maj_vignettes(self, cams):
+        n = self.colonnes_effectives()
+        for cle, v in self.vignettes.items():
+            v.ids = [c["id"] for c in cams if c["srv"] == cle and c["etat"] != "arret"] if self.isVisible() else []
+            v.largeur = 960 if n <= 1 else 720 if n == 2 else 520
 
     def reconstruire(self):
         for t in self.tuiles.values():
@@ -501,48 +593,62 @@ class PageCameras(QWidget):
         n = self.colonnes_effectives()
         for i, c in enumerate(cams):
             t = Tuile(self, c)
-            self.tuiles[c["id"]] = t
+            self.tuiles[c["uid"]] = t
             self.grille.addWidget(t, i // n, i % n)
         for c in range(5):
             self.grille.setColumnStretch(c, 1 if c < n else 0)
-        if self.vignettes is not None:
-            self.vignettes.ids = [c["id"] for c in cams if c["etat"] != "arret"]
-            self.vignettes.largeur = 960 if n <= 1 else 720 if n == 2 else 520
+        self._maj_vignettes(cams)
         self._message()
 
     def _message(self):
-        if self.fen.sans_entreprise:
+        fen = self.fen
+        actifs = fen.serveurs_actifs()
+        tous = all(s.affiche for s in actifs)
+        self.b_serveurs.setVisible(len(actifs) > 1)
+        self.b_serveurs.setText("Tous les serveurs" if tous else
+                                ", ".join(s.nom for s in fen.affiches())[:40] or "Aucun serveur")
+        if fen.affiches() and all(s.sans_entreprise for s in fen.affiches()):
             self.message.setText("Votre compte n'est rattaché à aucune entreprise : le responsable du PC Flux doit vous "
                                  "attribuer des caméras.")
-        elif not self.fen.cameras:
+        elif not fen.cameras:
             self.message.setText("Aucune caméra disponible pour votre entreprise.")
         else:
-            m = len(self.fen.cameras) - len(self.visibles())
-            self.message.setText(("Double-clic sur une caméra pour l'ouvrir en grand. "
-                                  + (f"{m} caméra(s) masquée(s)." if m else "")).strip())
+            m = len(fen.cameras) - len(self.visibles())
+            hors = [s.nom for s in fen.affiches() if not s.en_ligne]
+            self.message.setText(" ".join(x for x in (
+                "Double-clic sur une caméra pour l'ouvrir en grand.",
+                f"{m} caméra(s) masquée(s)." if m else "",
+                f"Injoignable : {', '.join(hors)}." if hors else "") if x))
 
     def rafraichir(self):
-        ids = [c["id"] for c in self.visibles()]
-        if ids != list(self.tuiles):
+        uids = [c["uid"] for c in self.visibles()]
+        if uids != list(self.tuiles):
             self.reconstruire()
         for c in self.visibles():
-            self.tuiles[c["id"]].maj(c)
-        if self.vignettes is not None:
-            self.vignettes.ids = [c["id"] for c in self.visibles() if c["etat"] != "arret"] if self.isVisible() else []
+            self.tuiles[c["uid"]].maj(c)
+        self._maj_vignettes(self.visibles())
         self._message()
 
-    def demarrer(self, api):
-        self.arreter()
-        self.vignettes = Vignettes(api)
-        self.vignettes.image.connect(self._image)
+    def sync_serveurs(self):
+        """Une source d'images par serveur relié."""
+        actifs = {s.cle: s for s in self.fen.serveurs_actifs()}
+        for cle in list(self.vignettes):
+            if cle not in actifs or self.vignettes[cle].api is not actifs[cle].api:
+                self.vignettes.pop(cle).arreter()
+        for cle, s in actifs.items():
+            if cle not in self.vignettes:
+                v = Vignettes(s.api)
+                v.image.connect(lambda i, img, c=cle: self._image(f"{c}|{i}", img))
+                self.vignettes[cle] = v
+        self._maj_vignettes(self.visibles())
 
     def arreter(self):
-        if self.vignettes is not None:
-            self.vignettes.arreter()
-            self.vignettes = None
+        for v in self.vignettes.values():
+            v.arreter()
+        self.vignettes = {}
 
-    def _image(self, cam_id, img):
-        t = self.tuiles.get(cam_id)
+    def _image(self, uid, img):
+        t = self.tuiles.get(uid)
         if t is not None:
             t.vue.definir(img)
 
@@ -552,8 +658,8 @@ class PageCameras(QWidget):
 
     def hideEvent(self, e):
         super().hideEvent(e)
-        if self.vignettes is not None:
-            self.vignettes.ids = []
+        for v in self.vignettes.values():
+            v.ids = []
 
 
 class PageControle(QWidget):
@@ -563,16 +669,31 @@ class PageControle(QWidget):
         self.lignes_cam, self.lignes_canal = {}, {}
         racine = QVBoxLayout(self)
         racine.setContentsMargins(0, 0, 0, 0)
-        racine.addWidget(titre_page("Contrôle", "Les commandes s'appliquent au PC Flux et sont notées dans son journal "
-                                                "avec votre nom."))
+        racine.addWidget(titre_page("Contrôle", "Les commandes s'appliquent au PC Flux choisi et sont notées dans son "
+                                                "journal avec votre nom."))
+        self.barre_srv = QWidget()
+        hb = QHBoxLayout(self.barre_srv)
+        hb.setContentsMargins(0, 0, 0, 6)
+        hb.addWidget(QLabel("Serveur"))
+        self.combo_srv = QComboBox()
+        self.combo_srv.setMinimumWidth(240)
+        self.combo_srv.activated.connect(lambda _i: (fen.choisir_controle(self.combo_srv.currentData()), self.rafraichir()))
+        hb.addWidget(self.combo_srv)
+        self.chk_tous = QCheckBox("Appliquer aussi aux autres serveurs")
+        self.chk_tous.setToolTip("Détection, niveau de scan, délais et notifications : le même réglage est envoyé à "
+                                 "tous les PC Flux affichés que vous pouvez piloter. Les commandes de caméra restent "
+                                 "propres à chaque serveur.")
+        hb.addWidget(self.chk_tous)
+        hb.addStretch(1)
+        racine.addWidget(self.barre_srv)
         self.pile = QStackedWidget()
         # sans droit
         sans = QWidget()
         sv = QVBoxLayout(sans)
-        f, v = carte("Pilotage non autorisé", "Votre compte peut voir les caméras et les alertes, mais pas piloter Flux. "
-                                             "Le responsable du PC Flux peut vous accorder ce droit : page FluxLite, clic "
-                                             "droit sur votre compte › Autoriser le pilotage à distance. Le PC Flux doit "
-                                             "être en version 0.9 ou plus récente.")
+        f, v = carte("Pilotage non autorisé", "Votre compte peut voir les caméras et les alertes de ce PC Flux, mais pas "
+                                             "le piloter. Son responsable peut vous accorder ce droit : page FluxLite, "
+                                             "clic droit sur votre compte › Autoriser le pilotage à distance. Le PC Flux "
+                                             "doit être en version 0.9 ou plus récente.")
         sv.addWidget(f)
         sv.addStretch(1)
         self.pile.addWidget(sans)
@@ -583,12 +704,12 @@ class PageControle(QWidget):
         g.setSpacing(14)
         f, v = carte("Détection")
         self.inter_det = Interrupteur()
-        self.inter_det.toggled.connect(lambda e: fen.piloter("detection.actif", bool(e)))
+        self.inter_det.toggled.connect(lambda e: self._global("detection.actif", bool(e)))
         v.addWidget(ligne_option("Toutes les caméras du PC", self.inter_det,
                                  "Coupée : les images restent visibles, sans analyse ni alerte."))
         v.addWidget(separateur())
         self.combo_niveau = QComboBox()
-        self.combo_niveau.activated.connect(lambda _i: fen.piloter("detection.niveau", self.combo_niveau.currentData()))
+        self.combo_niveau.activated.connect(lambda _i: self._global("detection.niveau", self.combo_niveau.currentData()))
         v.addWidget(ligne_option("Niveau de scan", self.combo_niveau))
         self.lbl_niveau = etiquette("")
         v.addWidget(self.lbl_niveau)
@@ -617,19 +738,41 @@ class PageControle(QWidget):
         self.pile.addWidget(defilant(contenu))
         racine.addWidget(self.pile, 1)
 
+    def _global(self, cle, valeur):
+        self.fen.piloter(cle, valeur, srv=self.fen.srv_controle(), tous=self.chk_tous.isChecked())
+
     def _delai(self, cle, w):
-        e = self.fen.etat_pilotage or {}
+        e = (self.fen.srv_controle() or Serveur({"cle": ""})).etat_pilotage or {}
         if abs((e.get("delais") or {}).get(cle, -1) - w.value()) > 1e-6:
-            self.fen.piloter(cle, w.value())
+            self._global(cle, w.value())
+
+    def _combo(self):
+        fen = self.fen
+        srvs = [s for s in fen.affiches() if s.pilotage_autorise] or fen.affiches()
+        if [self.combo_srv.itemData(i) for i in range(self.combo_srv.count())] != [s.cle for s in srvs]:
+            self.combo_srv.clear()
+            for s in srvs:
+                self.combo_srv.addItem(s.nom, s.cle)
+        courant = fen.srv_controle()
+        i = self.combo_srv.findData(courant.cle if courant else None)
+        if i >= 0:
+            self.combo_srv.setCurrentIndex(i)
+        self.barre_srv.setVisible(len(srvs) > 1)
+        self.chk_tous.setVisible(sum(1 for s in srvs if s.pilotage_autorise) > 1)
 
     def rafraichir(self):
         fen = self.fen
-        e = fen.etat_pilotage
-        self.pile.setCurrentIndex(1 if fen.pilotage_autorise and e else 0)
+        self._combo()
+        srv = fen.srv_controle()
+        e = srv.etat_pilotage if srv else None
+        self.pile.setCurrentIndex(1 if srv and srv.pilotage_autorise and e else 0)
         if not e:
             return
+        self.inter_det.blockSignals(True)
         self.inter_det.regler(e["detection"])
-        if self.combo_niveau.count() != len(e.get("niveaux", [])):
+        self.inter_det.blockSignals(False)
+        if [self.combo_niveau.itemData(i) for i in range(self.combo_niveau.count())] != \
+                [n["cle"] for n in e.get("niveaux", [])]:
             self.combo_niveau.clear()
             for n in e.get("niveaux", []):
                 self.combo_niveau.addItem(n["nom"], n["cle"])
@@ -640,10 +783,10 @@ class PageControle(QWidget):
         for cle, s in self.delais.items():
             if not s.hasFocus():
                 s.blockSignals(True)
-                s.setValue(float((e.get("delais") or {}).get(cle, 0)))
+                s.setValue(float((e.get("delais") or {}).get(cle) or 0))
                 s.blockSignals(False)
         # caméras
-        ids = [c["id"] for c in e["cameras"]]
+        ids = [srv.uid(c["id"]) for c in e["cameras"]]
         if ids != list(self.lignes_cam):
             for w in self.lignes_cam.values():
                 w["widget"].setParent(None)
@@ -657,23 +800,25 @@ class PageControle(QWidget):
                 h.addWidget(lab, 1)
                 h.addWidget(etiquette("En marche", "aide", False))
                 im = Interrupteur()
-                im.toggled.connect(lambda v, i=c["id"]: fen.piloter("camera.marche", bool(v), i))
+                im.toggled.connect(lambda v, i=c["id"], s=srv: fen.piloter("camera.marche", bool(v), i, s))
                 h.addWidget(im)
                 h.addSpacing(12)
                 h.addWidget(etiquette("Détection", "aide", False))
                 idt = Interrupteur()
-                idt.toggled.connect(lambda v, i=c["id"]: fen.piloter("camera.detection", bool(v), i))
+                idt.toggled.connect(lambda v, i=c["id"], s=srv: fen.piloter("camera.detection", bool(v), i, s))
                 h.addWidget(idt)
                 h.addSpacing(12)
                 bc = Bouton("Vidéo sur le PC", "discret", "video")
-                bc.clicked.connect(lambda _=False, i=c["id"]: fen.piloter("camera.clip", True, i))
+                bc.clicked.connect(lambda _=False, i=c["id"], s=srv: fen.piloter("camera.clip", True, i, s))
                 h.addWidget(bc)
                 self.v_cams.addWidget(w)
-                self.lignes_cam[c["id"]] = {"widget": w, "marche": im, "detection": idt, "clip": bc}
+                self.lignes_cam[srv.uid(c["id"])] = {"widget": w, "marche": im, "detection": idt, "clip": bc}
         for c in e["cameras"]:
-            ligne = self.lignes_cam[c["id"]]
-            ligne["marche"].regler(c.get("en_marche", False))
-            ligne["detection"].regler(c.get("detection", True))
+            ligne = self.lignes_cam[srv.uid(c["id"])]
+            for k, val in (("marche", c.get("en_marche", False)), ("detection", c.get("detection", True))):
+                ligne[k].blockSignals(True)
+                ligne[k].regler(val)
+                ligne[k].blockSignals(False)
             ligne["clip"].setEnabled(c.get("en_marche", False))
         # canaux
         cles = [c["cle"] for c in e["canaux"]]
@@ -683,14 +828,16 @@ class PageControle(QWidget):
             self.lignes_canal = {}
             for c in e["canaux"]:
                 inter = Interrupteur()
-                inter.toggled.connect(lambda v, k=c["cle"]: fen.piloter(k, bool(v)))
+                inter.toggled.connect(lambda v, k=c["cle"]: self._global(k, bool(v)))
                 w = ligne_option(c["nom"], inter, " ")
                 self.v_canaux.addWidget(w)
                 self.lignes_canal[c["cle"]] = {"widget": w, "inter": inter, "aide": w.findChildren(QLabel)[-1]}
         general = next((c for c in e["canaux"] if c["cle"] == "notif.actif"), None)
         for c in e["canaux"]:
             ligne = self.lignes_canal[c["cle"]]
+            ligne["inter"].blockSignals(True)
             ligne["inter"].regler(c["actif"])
+            ligne["inter"].blockSignals(False)
             ligne["inter"].setEnabled(c["configure"] or c["actif"])
             dependant = c["cle"] not in ("notif.actif", "mail.actif") and general is not None and not general["actif"]
             ligne["aide"].setText("Pas configuré sur le PC Flux" if not c["configure"] else
@@ -699,14 +846,21 @@ class PageControle(QWidget):
 
 
 class PageJournal(QWidget):
+    TAILLE = 60
+
     def __init__(self, fen):
         super().__init__()
         self.fen = fen
         self.evenements, self.fin = [], False
+        self.plus_anciens = {}  # serveur -> identifiant le plus ancien chargé (None : tout est chargé)
         racine = QVBoxLayout(self)
         racine.setContentsMargins(0, 0, 0, 0)
         racine.addWidget(titre_page("Journal", "Les alertes de vos caméras, les plus récentes en haut."))
         filtres = QHBoxLayout()
+        self.combo_srv = QComboBox()
+        self.combo_srv.addItem("Tous les serveurs", None)
+        self.combo_srv.currentIndexChanged.connect(lambda _i: (self.maj_cameras(forcer=True), self.charger()))
+        filtres.addWidget(self.combo_srv)
         self.combo_cam = QComboBox()
         self.combo_cam.addItem("Toutes les caméras", None)
         self.combo_cam.currentIndexChanged.connect(lambda _i: self.charger())
@@ -723,15 +877,15 @@ class PageJournal(QWidget):
         filtres.addWidget(b)
         racine.addLayout(filtres)
         corps = QHBoxLayout()
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Date", "Caméra", "Alerte", "Photo"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["Date", "Caméra", "Serveur", "Alerte", "Photo"])
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._apercu)
         self.table.verticalScrollBar().valueChanged.connect(self._defile)
         corps.addWidget(self.table, 1)
@@ -760,11 +914,29 @@ class PageJournal(QWidget):
         racine.addLayout(corps, 1)
         self._pix = None
 
-    def maj_cameras(self):
-        actuel = self.combo_cam.currentData()
-        noms = [(c["id"], c["nom"]) for c in self.fen.cameras]
-        if [self.combo_cam.itemData(i) for i in range(1, self.combo_cam.count())] == [i for i, _ in noms]:
+    def _serveurs(self):
+        cle = self.combo_srv.currentData()
+        return [s for s in self.fen.affiches() if cle is None or s.cle == cle]
+
+    def maj_cameras(self, forcer=False):
+        fen = self.fen
+        srvs = [(s.cle, s.nom) for s in fen.affiches()]
+        if [self.combo_srv.itemData(i) for i in range(1, self.combo_srv.count())] != [c for c, _ in srvs]:
+            actuel = self.combo_srv.currentData()
+            self.combo_srv.blockSignals(True)
+            self.combo_srv.clear()
+            self.combo_srv.addItem("Tous les serveurs", None)
+            for c, n in srvs:
+                self.combo_srv.addItem(n, c)
+            self.combo_srv.setCurrentIndex(max(0, self.combo_srv.findData(actuel)))
+            self.combo_srv.blockSignals(False)
+        self.combo_srv.setVisible(len(srvs) > 1)
+        cles = {s.cle for s in self._serveurs()}
+        noms = [(c["uid"], c["nom"] + (f" · {c['serveur']}" if fen.plusieurs() and self.combo_srv.currentData() is None
+                                       else "")) for c in fen.cameras if c["srv"] in cles]
+        if not forcer and [self.combo_cam.itemData(i) for i in range(1, self.combo_cam.count())] == [i for i, _ in noms]:
             return
+        actuel = self.combo_cam.currentData()
         self.combo_cam.blockSignals(True)
         self.combo_cam.clear()
         self.combo_cam.addItem("Toutes les caméras", None)
@@ -774,34 +946,66 @@ class PageJournal(QWidget):
         self.combo_cam.blockSignals(False)
 
     def charger(self, suite=False):
-        if self.fen.api is None:
+        fen = self.fen
+        uid = self.combo_cam.currentData()
+        srv_cam, cam_id = uid.split("|", 1) if uid else (None, None)
+        cibles = [s for s in self._serveurs() if s.actif and (srv_cam is None or s.cle == srv_cam)]
+        if suite:
+            cibles = [s for s in cibles if self.plus_anciens.get(s.cle)]
+        else:
+            self.plus_anciens = {}
+        if not cibles:
+            if not suite:
+                self.evenements = []
+                self._remplir()
             return
-        avant = self.evenements[-1]["id"] if suite and self.evenements else None
-        cam = self.combo_cam.currentData()
+        taille = self.TAILLE
 
-        def fini(r):
-            lignes = r.get("journal", [])
-            self.evenements = (self.evenements if suite else []) + lignes
-            self.fin = len(lignes) < 60
-            if not suite and cam is None:
-                self.fen.dernieres_alertes = [e for e in self.evenements if e["niveau"] == "alerte"][:50]
-                self.fen.journal_charge = True
+        def tout_charger():
+            resultats = []
+            for s in cibles:
+                try:
+                    lignes = s.api.journal(self.plus_anciens.get(s.cle) if suite else None, cam_id, taille)\
+                        .get("journal", [])
+                except module_api.ErreurApi as e:
+                    if e.code == 401:
+                        raise
+                    lignes = []
+                except Exception:  # noqa: BLE001
+                    lignes = []
+                resultats.append((s, lignes))
+            return resultats
+
+        def fini(resultats):
+            nouveaux = []
+            for s, lignes in resultats:
+                self.plus_anciens[s.cle] = lignes[-1]["id"] if len(lignes) >= taille else None
+                nouveaux += [fen.enrichir(e, s) for e in lignes]
+            nouveaux.sort(key=lambda e: e["heure"], reverse=True)
+            self.evenements = (self.evenements if suite else []) + nouveaux
+            self.fin = not any(self.plus_anciens.values())
+            if not suite and uid is None and self.combo_srv.currentData() is None:
+                fen.dernieres_alertes = [e for e in self.evenements if e["niveau"] == "alerte"][:50]
+                fen.journal_charge = True
             self._remplir()
-        self.fen.appeler(lambda: self.fen.api.journal(avant, cam), fini)
+        fen.appeler(tout_charger, fini)
 
     def _remplir(self):
         filtre = self.recherche.text().strip().lower()
-        lignes = [e for e in self.evenements if not filtre or filtre in (e["texte"] + " " + e["camera"]).lower()]
+        lignes = [e for e in self.evenements
+                  if not filtre or filtre in (e["texte"] + " " + e["camera"] + " " + e.get("serveur", "")).lower()]
+        self.table.setColumnHidden(2, not self.fen.plusieurs())
         self.table.setRowCount(len(lignes))
         for i, e in enumerate(lignes):
-            for j, val in enumerate((heure(e["heure"], True), e["camera"], e["texte"], "oui" if e.get("photo") else "")):
+            for j, val in enumerate((heure(e["heure"], True), e["camera"], e.get("serveur", ""), e["texte"],
+                                     "oui" if e.get("photo") else "")):
                 it = QTableWidgetItem(val)
                 it.setData(Qt.ItemDataRole.UserRole, e)
                 if e.get("prioritaire"):
                     it.setForeground(couleur("liste_noire"))
                 self.table.setItem(i, j, it)
-        self.table.resizeColumnToContents(0)
-        self.table.resizeColumnToContents(1)
+        for c in (0, 1, 2):
+            self.table.resizeColumnToContents(c)
         self.lbl_compte.setText(f"{len(lignes)} alerte(s) affichée(s)" + ("" if self.fin else " · faites défiler pour la suite"))
 
     def _defile(self, v):
@@ -820,8 +1024,10 @@ class PageJournal(QWidget):
         self._pix = None
         if e is None:
             return
-        self.lbl_detail.setText(f"{e['texte']}\n{e['camera']} · {heure(e['heure'], True)}")
-        if not e.get("photo"):
+        self.lbl_detail.setText(f"{e['texte']}\n{e['camera']}" + (f" · {e.get('serveur')}" if self.fen.plusieurs() else "")
+                                + f" · {heure(e['heure'], True)}")
+        srv = self.fen.serveurs.get(e.get("srv"))
+        if not e.get("photo") or srv is None or not srv.actif:
             self.photo.setText("Pas de photo pour cette alerte")
             return
         self.photo.setText("Chargement…")
@@ -837,7 +1043,7 @@ class PageJournal(QWidget):
                 self.b_photo.setEnabled(True)
             else:
                 self.photo.setText("Photo indisponible (effacée après la durée de conservation)")
-        self.fen.appeler(lambda: self.fen.api.photo(e["id"]), fini)
+        self.fen.appeler(lambda: srv.api.photo(e["id"]), fini, srv=srv)
 
     def _enregistrer_photo(self):
         e = self._courant()
@@ -846,7 +1052,7 @@ class PageJournal(QWidget):
 
     def _ouvrir_camera(self):
         e = self._courant()
-        cam = next((c for c in self.fen.cameras if c["id"] == (e or {}).get("camera_id")), None)
+        cam = next((c for c in self.fen.cameras if c["uid"] == (e or {}).get("uid")), None)
         if cam:
             self.fen.ouvrir_video(cam)
         elif e:
@@ -863,9 +1069,9 @@ class PageJournal(QWidget):
             return
         with open(chemin, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f, delimiter=";")
-            w.writerow(["Date", "Caméra", "Alerte", "Niveau", "Liste noire"])
+            w.writerow(["Date", "Serveur", "Caméra", "Alerte", "Niveau", "Liste noire"])
             for e in self.evenements:
-                w.writerow([heure(e["heure"], True), e["camera"], e["texte"], e["niveau"],
+                w.writerow([heure(e["heure"], True), e.get("serveur", ""), e["camera"], e["texte"], e["niveau"],
                             "oui" if e.get("prioritaire") else ""])
         self.fen.toast(f"Journal exporté ({len(self.evenements)} lignes).", "ok")
 
@@ -881,7 +1087,17 @@ class PageCompte(QWidget):
         self.fen = fen
         racine = QVBoxLayout(self)
         racine.setContentsMargins(0, 0, 0, 0)
-        racine.addWidget(titre_page("Compte"))
+        racine.addWidget(titre_page("Compte", "Chaque PC Flux a ses propres comptes : choisissez le serveur."))
+        self.barre_srv = QWidget()
+        hb = QHBoxLayout(self.barre_srv)
+        hb.setContentsMargins(0, 0, 0, 6)
+        hb.addWidget(QLabel("Compte sur le serveur"))
+        self.combo_srv = QComboBox()
+        self.combo_srv.setMinimumWidth(240)
+        self.combo_srv.activated.connect(lambda _i: (fen.choisir_courant(self.combo_srv.currentData()), self.showEvent(None)))
+        hb.addWidget(self.combo_srv)
+        hb.addStretch(1)
+        racine.addWidget(self.barre_srv)
         contenu = QWidget()
         g = QGridLayout(contenu)
         g.setContentsMargins(0, 4, 4, 4)
@@ -904,7 +1120,7 @@ class PageCompte(QWidget):
         v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
         v.addStretch(1)
         g.addWidget(f, 0, 0)
-        f, v = carte("Mot de passe", "Vos autres appareils seront déconnectés.")
+        f, v = carte("Mot de passe", "Sur ce serveur seulement. Vos autres appareils seront déconnectés.")
         self.c_ancien = QLineEdit()
         self.c_nouveau = QLineEdit()
         self.c_confirm = QLineEdit()
@@ -921,7 +1137,7 @@ class PageCompte(QWidget):
         b.clicked.connect(self._changer_mdp)
         v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
         g.addWidget(f, 0, 1)
-        f, v = carte("Appareils connectés")
+        f, v = carte("Appareils connectés à ce serveur")
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Appareil", "Adresse", "Dernière activité"])
         self.table.verticalHeader().setVisible(False)
@@ -935,12 +1151,20 @@ class PageCompte(QWidget):
         b.clicked.connect(self._revoquer)
         h.addWidget(b)
         b = Bouton("Déconnecter tous mes autres appareils", "discret")
-        b.clicked.connect(lambda: self.fen.appeler(lambda: self.fen.api.revoquer(None), self._profil_recu,
-                                                   "Vos autres appareils sont déconnectés."))
+        b.clicked.connect(lambda: self._srv() and self.fen.appeler(lambda: self._srv().api.revoquer(None), self._profil_recu,
+                                                                   "Vos autres appareils sont déconnectés.", srv=self._srv()))
         h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
         g.addWidget(f, 1, 0, 1, 2)
+        f, v = carte("Mon compte sur d'autres PC Flux", "Suivez plusieurs établissements depuis Flux Remote. Si votre "
+                                                          "responsable a transféré votre compte, connectez-vous avec le "
+                                                          "même mail et le même mot de passe ; sinon, vos informations "
+                                                          "sont reprises pour créer le compte en un clic.")
+        b = Bouton("Utiliser mon compte sur un autre serveur", "discret", "plus")
+        b.clicked.connect(fen.ajouter_serveur)
+        v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        g.addWidget(f, 2, 0, 1, 2)
         f, v = carte("Mes données (RGPD)")
         h = QHBoxLayout()
         b = Bouton("Exporter mes données", "discret", "telecharger")
@@ -954,24 +1178,42 @@ class PageCompte(QWidget):
         h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
-        g.addWidget(f, 2, 0, 1, 2)
-        b = Bouton("Se déconnecter", "danger", "sortie")
-        b.clicked.connect(self._deconnexion)
-        g.addWidget(b, 3, 0, Qt.AlignmentFlag.AlignLeft)
-        g.setRowStretch(4, 1)
+        g.addWidget(f, 3, 0, 1, 2)
+        self.b_deconnexion = Bouton("Se déconnecter de ce serveur", "danger", "sortie")
+        self.b_deconnexion.clicked.connect(self._deconnexion)
+        g.addWidget(self.b_deconnexion, 4, 0, Qt.AlignmentFlag.AlignLeft)
+        g.setRowStretch(5, 1)
         g.setColumnStretch(0, 1)
         g.setColumnStretch(1, 1)
         racine.addWidget(defilant(contenu), 1)
 
-    def showEvent(self, e):
-        super().showEvent(e)
-        self.fen.appeler(self.fen.api.profil, self._profil_recu)
+    def _srv(self):
+        return self.fen.courant()
 
-    def _profil_recu(self, p):
-        self.fen.profil = p
-        self.fen.pilotage_autorise = bool(p.get("pilotage"))
+    def showEvent(self, e):
+        if e is not None:
+            super().showEvent(e)
+        fen = self.fen
+        actifs = fen.serveurs_actifs()
+        self.combo_srv.clear()
+        for s in actifs:
+            self.combo_srv.addItem(s.nom, s.cle)
+        srv = self._srv()
+        if srv is not None:
+            self.combo_srv.setCurrentIndex(max(0, self.combo_srv.findData(srv.cle)))
+            fen.appeler(srv.api.profil, lambda p, s=srv: self._profil_recu(p, s), srv=srv)
+        self.barre_srv.setVisible(len(actifs) > 1)
+
+    def _profil_recu(self, p, srv=None):
+        srv = srv or self._srv()
+        if srv is None:
+            return
+        srv.profil = p
+        srv.pilotage_autorise = bool(p.get("pilotage"))
+        if srv is not self._srv():
+            return
         self.lbl_ident.setText(f"{p['prenom']} {p['nom']}")
-        self.lbl_infos.setText(f"{p['mail']}\nEntreprise : {p.get('entreprise') or 'aucune'}"
+        self.lbl_infos.setText(f"{p['mail']}\nServeur : {srv.nom}\nEntreprise : {p.get('entreprise') or 'aucune'}"
                                f"\nPilotage à distance : {'autorisé' if p.get('pilotage') else 'non autorisé'}"
                                f"\nCompte créé le {datetime.fromtimestamp(p['cree_le']):%d/%m/%Y}")
         if not self.c_prenom.hasFocus() and not self.c_nom.hasFocus():
@@ -989,12 +1231,16 @@ class PageCompte(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
 
     def _enregistrer_nom(self):
+        srv = self._srv()
         p, n = self.c_prenom.text().strip(), self.c_nom.text().strip()
         if not p or not n:
             return self.fen.toast("Le prénom et le nom ne peuvent pas être vides.", "erreur")
-        self.fen.appeler(lambda: self.fen.api.modifier_profil(prenom=p, nom=n), self._profil_recu, "Profil enregistré.")
+        if srv:
+            self.fen.appeler(lambda: srv.api.modifier_profil(prenom=p, nom=n), self._profil_recu, "Profil enregistré.",
+                             srv=srv)
 
     def _changer_mdp(self):
+        srv = self._srv()
         a, n, c = self.c_ancien.text(), self.c_nouveau.text(), self.c_confirm.text()
         if not mdp_accepte(n):
             return self.fen.toast("Nouveau mot de passe trop faible : 10 caractères, lettres et chiffres.", "erreur")
@@ -1005,18 +1251,23 @@ class PageCompte(QWidget):
             for w in (self.c_ancien, self.c_nouveau, self.c_confirm):
                 w.clear()
             self.fen.toast(r.get("message") or "Mot de passe changé.", "ok")
-        self.fen.appeler(lambda: self.fen.api.changer_mdp(a, n), fini)
+        if srv:
+            self.fen.appeler(lambda: srv.api.changer_mdp(a, n), fini, srv=srv)
 
     def _revoquer(self):
+        srv = self._srv()
         it = self.table.item(self.table.currentRow(), 0) if self.table.currentRow() >= 0 else None
         s = it.data(Qt.ItemDataRole.UserRole) if it else None
-        if not s:
+        if not s or srv is None:
             return self.fen.toast("Choisissez un appareil dans la liste.")
         if s.get("courante"):
             return self._deconnexion()
-        self.fen.appeler(lambda: self.fen.api.revoquer(s["id"]), self._profil_recu, "Appareil déconnecté.")
+        self.fen.appeler(lambda: srv.api.revoquer(s["id"]), self._profil_recu, "Appareil déconnecté.", srv=srv)
 
     def _exporter(self):
+        srv = self._srv()
+        if srv is None:
+            return
         chemin, _ = QFileDialog.getSaveFileName(self, "Exporter mes données",
                                                 os.path.join(os.path.expanduser("~"), "flux-mes-donnees.json"),
                                                 "JSON (*.json)")
@@ -1025,16 +1276,17 @@ class PageCompte(QWidget):
                 with open(chemin, "wb") as f:
                     f.write(octets)
                 self.fen.toast("Vos données ont été exportées.", "ok")
-            self.fen.appeler(self.fen.api.exporter, fini)
+            self.fen.appeler(srv.api.exporter, fini, srv=srv)
 
     def _cgu(self):
+        srv = self._srv()
         d = QDialog(self)
         d.setWindowTitle("Conditions d'utilisation")
         d.resize(700, 600)
         v = QVBoxLayout(d)
         from PySide6.QtWidgets import QTextBrowser
         t = QTextBrowser()
-        t.setHtml(html_cgu(self.fen.info))
+        t.setHtml(html_cgu(srv.info if srv else None))
         v.addWidget(t)
         b = Bouton("Fermer", "discret")
         b.clicked.connect(d.accept)
@@ -1042,21 +1294,23 @@ class PageCompte(QWidget):
         d.exec()
 
     def _supprimer(self):
+        srv = self._srv()
+        if srv is None:
+            return
         mdp, ok = QInputDialog.getText(self, "Supprimer mon compte",
-                                       "Votre compte et vos informations seront effacés du PC Flux. C'est définitif.\n\n"
-                                       "Mot de passe pour confirmer :", QLineEdit.EchoMode.Password)
+                                       f"Votre compte et vos informations seront effacés du PC Flux « {srv.nom} ». "
+                                       "C'est définitif.\n\nMot de passe pour confirmer :", QLineEdit.EchoMode.Password)
         if ok and mdp:
             def fini(r):
                 self.fen.toast(r.get("message") or "Compte supprimé.", "ok")
-                self.fen.fin_session()
-            self.fen.appeler(lambda: self.fen.api.supprimer_compte(mdp), fini)
+                self.fen.deconnecter_serveur(srv, oublier=True, appel=False)
+            self.fen.appeler(lambda: srv.api.supprimer_compte(mdp), fini, srv=srv)
 
     def _deconnexion(self):
-        if QMessageBox.question(self, "Se déconnecter", "Se déconnecter de ce PC Flux ? Vous ne recevrez plus d'alertes "
-                                "sur cet ordinateur.") == QMessageBox.StandardButton.Yes:
-            api = self.fen.api
-            Tache(api.deconnecter).lancer()
-            self.fen.fin_session()
+        srv = self._srv()
+        if srv and QMessageBox.question(self, "Se déconnecter", f"Se déconnecter du PC Flux « {srv.nom} » ? Vous ne "
+                                        "recevrez plus ses alertes sur cet ordinateur.") == QMessageBox.StandardButton.Yes:
+            self.fen.deconnecter_serveur(srv)
 
 
 class PageReglages(QWidget):
@@ -1071,6 +1325,18 @@ class PageReglages(QWidget):
         g = QGridLayout(contenu)
         g.setContentsMargins(0, 4, 4, 4)
         g.setSpacing(14)
+
+        f, v = carte("Serveurs Flux", "Les PC Flux suivis par Flux Remote. Chacun garde sa clé, sa session et ses droits.")
+        self.v_serveurs = QVBoxLayout()
+        self.v_serveurs.setSpacing(2)
+        v.addLayout(self.v_serveurs)
+        h = QHBoxLayout()
+        b = Bouton("Ajouter un serveur", "discret", "plus")
+        b.clicked.connect(fen.ajouter_serveur)
+        h.addWidget(b)
+        h.addStretch(1)
+        v.addLayout(h)
+        g.addWidget(f, 0, 0, 1, 2)
 
         f, v = carte("Alertes sur cet ordinateur")
         self.combo_mode = QComboBox()
@@ -1099,10 +1365,11 @@ class PageReglages(QWidget):
         i_ouvrir.regler(bool(reg["alertes.ouvrir_camera"]))
         i_ouvrir.toggled.connect(lambda e: reg.set("alertes.ouvrir_camera", bool(e)))
         v.addWidget(ligne_option("Ouvrir la caméra quand je clique sur une alerte", i_ouvrir))
+        v.addWidget(etiquette("Seuls les serveurs affichés envoient des alertes sur cet ordinateur."))
         b = Bouton("Tester une alerte", "discret", "cloche")
         b.clicked.connect(fen.alerte_test)
         v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
-        g.addWidget(f, 0, 0)
+        g.addWidget(f, 1, 0)
 
         f, v = carte("Démarrage et fenêtre")
         for cle, lib, aide, rappel in (
@@ -1121,7 +1388,7 @@ class PageReglages(QWidget):
         b = Bouton("Créer un raccourci sur le bureau", "discret", "plus")
         b.clicked.connect(self._raccourci)
         v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
-        g.addWidget(f, 0, 1)
+        g.addWidget(f, 1, 1)
 
         f, v = carte("Apparence")
         self.combo_theme = QComboBox()
@@ -1140,7 +1407,7 @@ class PageReglages(QWidget):
         i_anim.regler(bool(reg["apparence.animations"]))
         i_anim.toggled.connect(lambda e: (reg.set("apparence.animations", bool(e)), theme.appliquer(reg)))
         v.addWidget(ligne_option("Animations", i_anim))
-        g.addWidget(f, 1, 0)
+        g.addWidget(f, 2, 0)
 
         f, v = carte("Captures")
         self.lbl_dossier = etiquette("")
@@ -1154,7 +1421,7 @@ class PageReglages(QWidget):
         h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
-        g.addWidget(f, 1, 1)
+        g.addWidget(f, 2, 1)
 
         f, v = carte("Mises à jour")
         i_maj = Interrupteur()
@@ -1179,62 +1446,104 @@ class PageReglages(QWidget):
         h.addWidget(b)
         h.addStretch(1)
         v.addLayout(h)
-        g.addWidget(f, 2, 0)
-
-        f, v = carte("Serveur Flux")
-        self.lbl_serveur = etiquette("")
-        v.addWidget(self.lbl_serveur)
-        h = QHBoxLayout()
-        b = Bouton("Relais Internet…", "discret", "lien")
-        b.setToolTip("Adresse du relais Flux utilisé hors du réseau du PC Flux. Vide = celui publié sur le site.")
-        b.clicked.connect(self._choisir_relais)
-        h.addWidget(b)
-        b = Bouton("Changer de serveur", "danger", "reseau")
-        b.clicked.connect(self._changer_serveur)
-        h.addWidget(b)
-        h.addStretch(1)
-        v.addLayout(h)
-        g.addWidget(f, 2, 1)
+        g.addWidget(f, 3, 0)
 
         f, v = carte("À propos")
         v.addWidget(etiquette(f"Flux Remote {VERSION} · la télécommande de Flux pour Windows et Linux.\n"
-                              "Construit avec Python, Qt pour Python (PySide6, licence LGPL v3) et cryptography (Apache 2.0). "
-                              "Détail des licences dans le fichier LICENCES-TIERCES.md à côté du programme."))
-        g.addWidget(f, 3, 0, 1, 2)
+                              "© 2026 DMS Security · logiciel libre sous licence GNU AGPL-3.0, sans garantie. Code "
+                              "source : github.com/Daoakashi/FluxRemote. Construit avec Python, Qt pour Python (PySide6, "
+                              "LGPL v3) et cryptography (Apache 2.0) : détail dans LICENCES-TIERCES.md, à côté du "
+                              "programme.\nFlux Remote a été conçu et développé avec l'aide d'outils d'intelligence "
+                              "artificielle, sous la direction et la vérification de son auteur. Aucune image n'est "
+                              "envoyée à un service d'IA."))
+        h = QHBoxLayout()
+        b = Bouton("Feedback", "discret", "message")
+        b.setToolTip("Envoyer une idée, un problème ou une question à l'éditeur de Flux")
+        b.clicked.connect(fen.feedback)
+        h.addWidget(b)
+        h.addStretch(1)
+        v.addLayout(h)
+        g.addWidget(f, 3, 1)
         g.setRowStretch(4, 1)
         g.setColumnStretch(0, 1)
         g.setColumnStretch(1, 1)
         racine.addWidget(defilant(contenu), 1)
 
+    def _lignes_serveurs(self):
+        fen = self.fen
+        vider(self.v_serveurs)
+        relais_site = module_api.texte_relais(module_api.relais_site())
+        for s in fen.serveurs.values():
+            w = QWidget()
+            h = QHBoxLayout(w)
+            h.setContentsMargins(0, 6, 0, 6)
+            voy = Voyant(12)
+            voy.regler(("direct" if s.en_ligne else "arret") if s.actif else "chargement")
+            h.addWidget(voy)
+            txt = QVBoxLayout()
+            txt.setSpacing(0)
+            lab = QLabel(s.nom)
+            lab.setStyleSheet("font-weight: 600;")
+            txt.addWidget(lab)
+            relais = s.relais or relais_site
+            txt.addWidget(etiquette(
+                (f"{s.texte_route()} · " if s.actif else "Déconnecté · ")
+                + f"clé {module_api.formater_cle(s.cle)[:14]}… · "
+                + (f"Internet : relais {relais}" + (" (propre à ce PC)" if s.relais else "") if relais
+                   else "aucun relais Internet connu"), "aide"))
+            h.addLayout(txt, 1)
+            if s.actif:
+                h.addWidget(etiquette("Affiché", "aide", False))
+                inter = Interrupteur()
+                inter.regler(s.affiche)
+                inter.toggled.connect(lambda e, s=s: fen.basculer_affichage(s, bool(e)))
+                h.addWidget(inter)
+            b = Bouton("Relais…", "fantome", "lien")
+            b.setToolTip("Adresse du relais Flux utilisé hors du réseau de ce PC Flux. Vide = celui publié sur le site.")
+            b.clicked.connect(lambda _=False, s=s: self._choisir_relais(s))
+            h.addWidget(b)
+            if s.actif:
+                b = Bouton("Se déconnecter", "fantome")
+                b.clicked.connect(lambda _=False, s=s: fen.deconnecter_serveur(s))
+            else:
+                b = Bouton("Se reconnecter", "discret", "reseau")
+                b.clicked.connect(lambda _=False, s=s: fen.reconnecter(s))
+            h.addWidget(b)
+            b = Bouton("Retirer", "danger")
+            b.clicked.connect(lambda _=False, s=s: self._retirer(s))
+            h.addWidget(b)
+            self.v_serveurs.addWidget(w)
+
     def showEvent(self, e):
         if e is not None:
             super().showEvent(e)
-        reg = self.fen.reg
-        self.lbl_dossier.setText(systeme.dossier_captures(reg["systeme.dossier_captures"]))
-        relais = reg["relais"] or module_api.texte_relais(module_api.relais_site())
-        self.lbl_serveur.setText(f"{reg['nom_serveur'] or 'Flux'}\nRéseau local : "
-                                 f"{(reg['hote'] + ':' + str(reg['port'])) if reg['hote'] else '—'}\n"
-                                 f"Par Internet : {('relais ' + relais) if relais else 'aucun relais connu'}"
-                                 f"{' (propre à ce PC Flux)' if reg['relais'] else ''}\nClé : "
-                                 f"{module_api.formater_cle(reg['cle'])}")
+        self.lbl_dossier.setText(systeme.dossier_captures(self.fen.reg["systeme.dossier_captures"]))
+        self._lignes_serveurs()
         self.maj_pause()
 
-    def _choisir_relais(self):
-        reg = self.fen.reg
+    def _choisir_relais(self, s):
         texte, ok = QInputDialog.getText(
-            self, "Relais Internet", "Adresse du relais (ex. relais.monentreprise.be ou 203.0.113.5:8443).\n"
-            "Laissez vide pour utiliser le relais publié sur le site de Flux.", text=reg["relais"])
+            self, f"Relais Internet · {s.nom}", "Adresse du relais (ex. relais.monentreprise.be ou 203.0.113.5:8443).\n"
+            "Laissez vide pour utiliser le relais publié sur le site de Flux.", text=s.relais)
         if not ok:
             return
         texte = texte.strip()
         if texte and not module_api.lire_adresse_relais(texte):
             self.fen.toast("Adresse de relais invalide.", "erreur")
             return
-        reg.set("relais", module_api.texte_relais(module_api.lire_adresse_relais(texte)) if texte else "")
-        if self.fen.api is not None:
-            self.fen.api.relais = module_api.lire_adresse_relais(reg["relais"]) if reg["relais"] else None
+        s.relais = module_api.texte_relais(module_api.lire_adresse_relais(texte)) if texte else ""
+        if s.api is not None:
+            s.api.relais = module_api.lire_adresse_relais(s.relais) if s.relais else None
+        self.fen.sauver_serveurs()
         self.fen.toast("Relais enregistré." if texte else "Relais du site utilisé.", "ok")
         self.showEvent(None)
+
+    def _retirer(self, s):
+        if QMessageBox.question(self, "Retirer le serveur", f"Flux Remote oubliera « {s.nom} », sa clé et votre session "
+                                "sur ce serveur. Votre compte là-bas n'est pas supprimé. Continuer ?") \
+                == QMessageBox.StandardButton.Yes:
+            self.fen.deconnecter_serveur(s, oublier=True)
+            self.showEvent(None)
 
     def maj_pause(self):
         jusqua = self.fen.reg["alertes.pause_jusqua"]
@@ -1259,14 +1568,6 @@ class PageReglages(QWidget):
             self.fen.reg.set("systeme.dossier_captures", d)
             self.lbl_dossier.setText(d)
 
-    def _changer_serveur(self):
-        if QMessageBox.question(self, "Changer de serveur", "Flux Remote oubliera ce PC Flux, sa clé et votre session. "
-                                "Continuer ?") == QMessageBox.StandardButton.Yes:
-            api = self.fen.api
-            if api is not None:
-                Tache(api.deconnecter).lancer()
-            self.fen.fin_session(oublier=True)
-
 
 # ---------------------------------------------------------------------------------------------------
 # Fenêtre principale
@@ -1275,14 +1576,16 @@ class Fenetre(QMainWindow):
     def __init__(self, reg, reduit=False):
         super().__init__()
         self.reg = reg
-        self.api, self.ecoute = None, None
-        self.info, self.profil, self.etat_pilotage = None, {}, None
-        self.cameras, self.dernieres_alertes = [], []
-        self.journal_charge, self.sans_entreprise, self.detection_globale = False, False, True
-        self.pilotage_autorise, self.en_ligne = False, True
+        self.serveurs = {}  # clé -> Serveur, dans l'ordre d'ajout
+        for d in reg["serveurs"] or []:
+            if d.get("cle") and d["cle"] not in self.serveurs:
+                self.serveurs[d["cle"]] = Serveur(d)
+        self.dernieres_alertes = []
+        self.journal_charge = False
         self.videos, self.derniers_envois, self.retenues = {}, {}, {}
-        self._derniere_alerte_cam = None
+        self._derniere_alerte_uid = None
         self._non_vues = 0
+        self._srv_controle = None
         self.setWindowTitle("Flux Remote")
         self.setWindowIcon(icone_programme())
         self.setMinimumSize(1060, 680)
@@ -1294,6 +1597,7 @@ class Fenetre(QMainWindow):
         self.setCentralWidget(self.pile)
         self.accueil = Accueil(self)
         self.accueil.connecte.connect(self.debut_session)
+        self.accueil.annule.connect(self.retour_principal)
         self.pile.addWidget(self.accueil)
         self.principal = self._principal()
         self.pile.addWidget(self.principal)
@@ -1307,8 +1611,13 @@ class Fenetre(QMainWindow):
         self._timer = QTimer(self)
         self._timer.setInterval(3000)
         self._timer.timeout.connect(self._cycle)
-        if reg["jeton"] and reg["cle"]:
-            self.debut_session()
+        avec_session = [s for s in self.serveurs.values() if s.jeton]
+        for s in avec_session:
+            self.demarrer_serveur(s)
+        if avec_session:
+            self._ouvrir_principal()
+        elif self.serveurs:
+            self.reconnecter(next(iter(self.serveurs.values())))
         else:
             self.pile.setCurrentWidget(self.accueil)
             self.accueil.montrer()
@@ -1316,6 +1625,234 @@ class Fenetre(QMainWindow):
             self.show()
         if reg["maj.auto"]:
             QTimer.singleShot(5000, lambda: self.verifier_maj(manuel=False))
+
+    # --- serveurs ---------------------------------------------------------------------------------
+    def serveurs_actifs(self):
+        return [s for s in self.serveurs.values() if s.actif]
+
+    def affiches(self):
+        actifs = self.serveurs_actifs()
+        return [s for s in actifs if s.affiche] or actifs
+
+    def plusieurs(self):
+        return len(self.affiches()) > 1
+
+    def courant(self):
+        """Serveur choisi pour le compte (et par défaut pour le contrôle)."""
+        actifs = self.serveurs_actifs()
+        return next((s for s in actifs if s.cle == self.reg["serveur.courant"]), actifs[0] if actifs else None)
+
+    def choisir_courant(self, cle):
+        self.reg.set("serveur.courant", cle or "")
+
+    def srv_controle(self):
+        candidats = [s for s in self.affiches() if s.pilotage_autorise] or self.affiches()
+        return next((s for s in candidats if s.cle == self._srv_controle), None) or \
+            next((s for s in candidats if s is self.courant()), None) or (candidats[0] if candidats else None)
+
+    def choisir_controle(self, cle):
+        self._srv_controle = cle
+        s = self.serveurs.get(cle)
+        if s is not None and s.actif and s.pilotage_autorise:
+            self.appeler(s.api.pilotage, lambda e, s=s: self._etat_recu(s, e), srv=s)
+
+    def serveur_de(self, cam):
+        return self.serveurs.get(cam.get("srv"))
+
+    def profil_connu(self):
+        s = self.courant()
+        if s is not None and s.profil:
+            return s.profil
+        return next((x.profil for x in self.serveurs_actifs() if x.profil), {})
+
+    def mail_connu(self):
+        return self.profil_connu().get("mail", "")
+
+    @property
+    def cameras(self):
+        cams = []
+        for s in self.affiches():
+            for c in s.cameras:
+                cams.append(dict(c, uid=s.uid(c["id"]), srv=s.cle, serveur=s.nom))
+        return cams
+
+    def enrichir(self, e, s):
+        return dict(e, srv=s.cle, uid=s.uid(e.get("camera_id", "")), serveur=s.nom)
+
+    def sauver_serveurs(self):
+        self.reg.set("serveurs", [s.vers_dict() for s in self.serveurs.values()])
+
+    def afficher_serveurs(self, cles):
+        for s in self.serveurs_actifs():
+            s.affiche = s.cle in cles
+        self.sauver_serveurs()
+
+    def basculer_affichage(self, s, valeur=None):
+        s.affiche = (not s.affiche) if valeur is None else valeur
+        if not any(x.affiche for x in self.serveurs_actifs()):
+            s.affiche = True
+        self.sauver_serveurs()
+        self.serveurs_changes()
+
+    def serveurs_changes(self):
+        self.p_cameras.reconstruire()
+        self._rafraichir_pages()
+        if self.pages_pile.currentWidget() is self.p_journal:
+            self.p_journal.maj_cameras(forcer=True)
+            self.p_journal.charger()
+
+    def demarrer_serveur(self, s):
+        self.arreter_serveur(s)
+        s.api = s.nouvelle_api()
+        s.en_ligne = True
+        s.ecoute = Ecoute(s.api)
+        s.ecoute.evenements.connect(lambda ev, s=s: self._alertes(ev, s))
+        s.ecoute.session_perdue.connect(lambda msg, s=s: self._session_perdue(s, msg))
+        s.ecoute.connecte.connect(lambda ok, s=s: self._connexion_etat(s, ok))
+        self.appeler(s.api.info, lambda i, s=s: self._info_recue(s, i), srv=s)
+        self.appeler(s.api.profil, lambda p, s=s: self._profil_recu(s, p), srv=s)
+        if hasattr(self, "p_cameras"):
+            self.p_cameras.sync_serveurs()
+
+    def arreter_serveur(self, s):
+        if s.ecoute is not None:
+            s.ecoute.arreter()
+            s.ecoute = None
+        s.api = None
+        s.cameras, s.etat_pilotage = [], None
+        for uid, v in list(self.videos.items()):
+            if uid.startswith(s.cle + "|"):
+                v.close()
+        if hasattr(self, "p_cameras"):
+            self.p_cameras.sync_serveurs()
+
+    def _ouvrir_principal(self):
+        self.pile.setCurrentWidget(self.principal)
+        self.statusBar().show()
+        self._maj_marque()
+        if self.pages_pile.currentWidget() is None or self.pages_pile.currentWidget() is self.p_tableau:
+            self.aller("tableau")
+        self._timer.start()
+        self.actualiser()
+        self.p_journal.charger()
+
+    def debut_session(self):
+        """Fin de l'appairage ou de la connexion d'un serveur (champs provisoires de reg) : il rejoint la liste."""
+        reg = self.reg
+        cle = reg["cle"]
+        s = self.serveurs.get(cle)
+        donnees = {"cle": cle, "nom": reg["nom_serveur"] or "Flux", "hote": reg["hote"], "hotes": reg["hotes"],
+                   "port": reg["port"], "relais": reg["relais"], "jeton": reg["jeton"], "cgu": reg["cgu"]}
+        if s is None:
+            s = Serveur(dict(donnees, affiche=True))
+            self.serveurs[cle] = s
+        else:
+            for k, val in donnees.items():
+                setattr(s, k, val)
+        reg.oublier_serveur()
+        self.sauver_serveurs()
+        if not reg["serveur.courant"] or reg["serveur.courant"] not in self.serveurs:
+            self.choisir_courant(cle)
+        self.demarrer_serveur(s)
+        if len(self.serveurs_actifs()) > 1:
+            self.toast(f"« {s.nom} » ajouté : ses caméras et ses alertes s'affichent avec les autres.", "ok")
+        self._ouvrir_principal()
+
+    def ajouter_serveur(self):
+        self.reg.oublier_serveur()
+        self.pile.setCurrentWidget(self.accueil)
+        self.accueil.montrer()
+
+    def reconnecter(self, s):
+        self.reg.maj(hote=s.hote, hotes=s.hotes, port=s.port, cle=s.cle, nom_serveur=s.nom, relais=s.relais,
+                     cgu=s.cgu, jeton="")
+        self.pile.setCurrentWidget(self.accueil)
+        self.accueil.montrer()
+
+    def retour_principal(self):
+        self.reg.oublier_serveur()
+        if self.serveurs_actifs():
+            self.pile.setCurrentWidget(self.principal)
+        else:
+            self.accueil.montrer()
+
+    def deconnecter_serveur(self, s, oublier=False, appel=True):
+        if appel and s.api is not None:
+            Tache(s.api.deconnecter).lancer()
+        self.arreter_serveur(s)
+        s.jeton = ""
+        if oublier:
+            self.serveurs.pop(s.cle, None)
+            for k in ("cameras.masquees", "alertes.muettes"):
+                self.reg.set(k, [u for u in self.reg[k] if not u.startswith(s.cle + "|")])
+        self.sauver_serveurs()
+        self.dernieres_alertes = [e for e in self.dernieres_alertes if e.get("srv") != s.cle]
+        self._apres_changement()
+
+    def _apres_changement(self):
+        if self.serveurs_actifs():
+            self._maj_marque()
+            self.serveurs_changes()
+            return
+        self._timer.stop()
+        self.statusBar().hide()
+        if self.serveurs:
+            self.reconnecter(next(iter(self.serveurs.values())))
+        else:
+            self.pile.setCurrentWidget(self.accueil)
+            self.accueil.montrer()
+
+    def _session_perdue(self, s, msg):
+        self.toast(f"{s.nom} : {msg or 'session expirée'}. Reconnectez-vous (Réglages › Serveurs Flux).", "erreur")
+        self.arreter_serveur(s)
+        s.jeton = ""
+        self.sauver_serveurs()
+        if self.serveurs_actifs():
+            self._apres_changement()
+        else:
+            self.reconnecter(s)
+
+    def _info_recue(self, s, info):
+        s.info = info
+        self.accueil.info = info
+        if info.get("nom") and info["nom"] != s.nom:
+            s.nom = info["nom"]
+            self.sauver_serveurs()
+        self._maj_marque()
+
+    def _profil_recu(self, s, p):
+        s.profil = p
+        s.pilotage_autorise = bool(p.get("pilotage"))
+        self.maj_zone()
+
+    def _connexion_etat(self, s, ok):
+        if ok != s.en_ligne:
+            s.en_ligne = ok
+            if not ok:
+                self.toast(f"Connexion à « {s.nom} » perdue, nouvelle tentative…", "erreur")
+        self._maj_barre()
+
+    def _maj_marque(self):
+        actifs = self.serveurs_actifs()
+        self.lbl_serveur.setText(f"{len(actifs)} serveurs Flux" if len(actifs) > 1 else
+                                 (actifs[0].nom if actifs else "Flux"))
+
+    def _maj_barre(self):
+        actifs = self.serveurs_actifs()
+        en_ligne = [s for s in actifs if s.en_ligne]
+        teinte = C["succes"] if len(en_ligne) == len(actifs) else C["danger"]
+        if len(actifs) == 1:
+            s = actifs[0]
+            texte = (f"● {'Connecté à' if s.en_ligne else 'Connexion perdue avec'} {s.nom} · {s.texte_route()} · "
+                     "chiffré, clé vérifiée")
+        else:
+            hors = [s.nom for s in actifs if not s.en_ligne]
+            texte = (f"● Connecté à {len(en_ligne)}/{len(actifs)} serveurs Flux · chiffré, clés vérifiées"
+                     + (f" · injoignable : {', '.join(hors)}" if hors else ""))
+        self.st_connexion.setText(texte)
+        self.st_connexion.setStyleSheet(f"color: {teinte}; padding: 0 6px;")
+        pause = self.reg["alertes.pause_jusqua"] > time.time()
+        self.st_alertes.setText("Alertes en pause" if pause else f"Alertes {dict(MODES_ALERTES)[self.reg['alertes.mode']].lower()}")
 
     # --- construction -----------------------------------------------------------------------------
     def _principal(self):
@@ -1350,6 +1887,11 @@ class Fenetre(QMainWindow):
             bv.addWidget(b)
             self.nav[cle] = b
         bv.addStretch(1)
+        b_fb = BoutonNav("Feedback", "message")
+        b_fb.setCheckable(False)
+        b_fb.setToolTip("Envoyer une idée, un problème ou une question à l'éditeur de Flux")
+        b_fb.clicked.connect(self.feedback)
+        bv.addWidget(b_fb)
         self.b_cloche = BoutonNav("Alertes sonores", "cloche")
         self.b_cloche.setCheckable(False)
         self.b_cloche.clicked.connect(self._menu_alertes)
@@ -1379,6 +1921,7 @@ class Fenetre(QMainWindow):
         for i, (cle, _, _) in enumerate(PAGES):
             QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self, activated=lambda k=cle: self.aller(k))
         QShortcut(QKeySequence("F5"), self, activated=self.actualiser)
+        self.p_cameras.sync_serveurs()
         return w
 
     def _zone(self):
@@ -1399,8 +1942,7 @@ class Fenetre(QMainWindow):
             sous.addAction(f"{hh} heure{'s' if hh > 1 else ''}", lambda h_=hh: self.pause_alertes(h_))
         sous.addAction("Reprendre maintenant", lambda: self.pause_alertes(0))
         m.addSeparator()
-        self.a_detection = m.addAction("Couper la détection sur le PC Flux",
-                                       lambda: self.piloter("detection.actif", not self.detection_globale))
+        self.a_detection = m.addAction("Couper la détection sur les PC Flux", self._basculer_detection)
         m.addSeparator()
         m.addAction("Quitter", self.quitter)
         self.zone.setContextMenu(m)
@@ -1409,6 +1951,15 @@ class Fenetre(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.zone.show()
         self.maj_zone()
+
+    def _pilotables(self):
+        return [s for s in self.affiches() if s.pilotage_autorise]
+
+    def _basculer_detection(self):
+        cibles = self._pilotables()
+        active = any(s.detection_globale for s in cibles)
+        for s in cibles:
+            self.piloter("detection.actif", not active, srv=s)
 
     def maj_zone(self):
         mode = self.reg["alertes.mode"]
@@ -1420,10 +1971,14 @@ class Fenetre(QMainWindow):
                               if pause else f"Alertes {lib.lower()}")
         self.b_cloche._icone = "cloche_barree" if pause or mode == "coupees" else "cloche"
         self.b_cloche.update()
-        self.a_detection.setVisible(self.pilotage_autorise)
-        self.a_detection.setText("Couper la détection sur le PC Flux" if self.detection_globale
-                                 else "Réactiver la détection sur le PC Flux")
-        self.zone.setToolTip(f"Flux Remote · {self.reg['nom_serveur'] or 'non connecté'}")
+        cibles = self._pilotables()
+        self.a_detection.setVisible(bool(cibles))
+        active = any(s.detection_globale for s in cibles)
+        lieu = "les PC Flux" if len(cibles) > 1 else "le PC Flux"
+        self.a_detection.setText(f"Couper la détection sur {lieu}" if active else f"Réactiver la détection sur {lieu}")
+        actifs = self.serveurs_actifs()
+        self.zone.setToolTip("Flux Remote · " + (f"{len(actifs)} serveurs" if len(actifs) > 1 else
+                                                 actifs[0].nom if actifs else "non connecté"))
         if hasattr(self, "p_reglages"):
             self.p_reglages.maj_pause()
 
@@ -1440,85 +1995,8 @@ class Fenetre(QMainWindow):
             m.addAction("Reprendre maintenant", lambda: self.pause_alertes(0))
         m.exec(self.b_cloche.mapToGlobal(self.b_cloche.rect().topLeft()))
 
-    # --- session ------------------------------------------------------------------------------------
-    def debut_session(self):
-        reg = self.reg
-        self.api = module_api.Api(reg["hote"], reg["port"], reg["cle"], reg["jeton"], relais=reg["relais"])
-        self.pile.setCurrentWidget(self.principal)
-        self.statusBar().show()
-        self.lbl_serveur.setText(reg["nom_serveur"] or "Flux")
-        self.p_cameras.demarrer(self.api)
-        self.ecoute = Ecoute(self.api)
-        self.ecoute.evenements.connect(self._alertes)
-        self.ecoute.session_perdue.connect(self._session_perdue)
-        self.ecoute.connecte.connect(self._connexion_etat)
-        self.appeler(self.api.info, self._info_recue)
-        self.appeler(self.api.profil, self._profil_recu)
-        self.aller("tableau")
-        self._timer.start()
-        self.actualiser()
-        self.p_journal.charger()
-
-    def fin_session(self, oublier=False):
-        self._timer.stop()
-        if self.ecoute is not None:
-            self.ecoute.arreter()
-            self.ecoute = None
-        self.p_cameras.arreter()
-        for v in list(self.videos.values()):
-            v.close()
-        self.api = None
-        self.reg.set("jeton", "")
-        if oublier:
-            self.reg.oublier_serveur()
-            self.reg.set("cgu", "")
-        self.cameras, self.dernieres_alertes, self.etat_pilotage = [], [], None
-        self.statusBar().hide()
-        self.pile.setCurrentWidget(self.accueil)
-        self.accueil.montrer()
-
-    def _session_perdue(self, msg):
-        self.toast(msg or "Session expirée : reconnectez-vous.", "erreur")
-        self.fin_session()
-
-    def _info_recue(self, info):
-        self.info = info
-        self.accueil.info = info
-        if info.get("nom"):
-            self.reg.set("nom_serveur", info["nom"])
-            self.lbl_serveur.setText(info["nom"])
-
-    def _profil_recu(self, p):
-        self.profil = p
-        self.pilotage_autorise = bool(p.get("pilotage"))
-        self.maj_zone()
-        self.nav["controle"].setVisible(True)
-
-    def _connexion_etat(self, ok):
-        if ok != self.en_ligne:
-            self.en_ligne = ok
-            if not ok:
-                self.toast("Connexion au PC Flux perdue, nouvelle tentative…", "erreur")
-        self._maj_barre()
-
-    def texte_route(self):
-        route = self.api.route if self.api is not None else ""
-        if route == "internet":
-            return "par Internet (relais Flux)"
-        if route == "direct":
-            return f"réseau local {self.reg['hote']}:{self.reg['port']}"
-        return f"{self.reg['hote'] or 'par Internet'}" + (f":{self.reg['port']}" if self.reg["hote"] else "")
-
-    def _maj_barre(self):
-        teinte = C["succes"] if self.en_ligne else C["danger"]
-        self.st_connexion.setText(f"● {'Connecté à' if self.en_ligne else 'Connexion perdue avec'} "
-                                  f"{self.reg['nom_serveur'] or 'Flux'} · {self.texte_route()} · chiffré, clé vérifiée")
-        self.st_connexion.setStyleSheet(f"color: {teinte}; padding: 0 6px;")
-        pause = self.reg["alertes.pause_jusqua"] > time.time()
-        self.st_alertes.setText("Alertes en pause" if pause else f"Alertes {dict(MODES_ALERTES)[self.reg['alertes.mode']].lower()}")
-
     # --- données ----------------------------------------------------------------------------------------
-    def appeler(self, f, rappel=None, message_ok=None):
+    def appeler(self, f, rappel=None, message_ok=None, srv=None):
         """Appel au serveur hors de l'interface ; les erreurs s'affichent en bas à droite."""
         def ok(r):
             if rappel:
@@ -1528,8 +2006,11 @@ class Fenetre(QMainWindow):
 
         def echec(msg):
             if msg.startswith(SESSION_PERDUE):
-                return self._session_perdue(msg[len(SESSION_PERDUE):])
-            self.toast(msg, "erreur")
+                cible = srv or self.courant()
+                if cible is not None and cible.actif:
+                    return self._session_perdue(cible, msg[len(SESSION_PERDUE):])
+                return
+            self.toast((f"{srv.nom} : " if srv is not None and self.plusieurs() else "") + msg, "erreur")
 
         def envelopper():
             try:
@@ -1543,42 +2024,44 @@ class Fenetre(QMainWindow):
         t.echec.connect(echec)
         return t.lancer()
 
+    def _etat_recu(self, s, e):
+        if s.actif:
+            s.etat_pilotage = e
+            s.detection_globale = e.get("detection", True)
+            self._rafraichir_pages()
+
     def actualiser(self):
-        if self.api is None:
-            return
-        api = self.api
+        for s in self.serveurs_actifs():
+            self._actualiser_serveur(s)
+
+    def _actualiser_serveur(self, s):
+        api = s.api
 
         def cameras_recues(r):
-            if api is not self.api:
+            if api is not s.api:
                 return
-            self.cameras = r.get("cameras", [])
-            self.sans_entreprise = not r.get("entreprise", True)
-            self.detection_globale = bool(r.get("detection", True))
-            if r.get("pilotage") != self.pilotage_autorise:
-                self.pilotage_autorise = bool(r.get("pilotage"))
-            self.en_ligne = True
-            for cam in self.cameras:
-                v = self.videos.get(cam["id"])
+            s.cameras = r.get("cameras", [])
+            s.sans_entreprise = not r.get("entreprise", True)
+            s.detection_globale = bool(r.get("detection", True))
+            s.pilotage_autorise = bool(r.get("pilotage", s.pilotage_autorise))
+            s.en_ligne = True
+            for cam in s.cameras:
+                v = self.videos.get(s.uid(cam["id"]))
                 if v is not None:
                     v.maj_camera(cam)
             self._rafraichir_pages()
             self.logo.animer(any(c["etat"] == "alerte" for c in self.cameras))
 
         def echec(_msg):
-            self.en_ligne = False
+            s.en_ligne = False
             self._maj_barre()
         t = Tache(api.cameras)
         t.fini.connect(cameras_recues)
         t.echec.connect(echec)
         t.lancer()
-        if self.pilotage_autorise:
-            def etat_recu(e):
-                if api is self.api:
-                    self.etat_pilotage = e
-                    self.detection_globale = e.get("detection", True)
-                    self._rafraichir_pages()
+        if s.pilotage_autorise:
             t2 = Tache(api.pilotage)
-            t2.fini.connect(etat_recu)
+            t2.fini.connect(lambda e: api is s.api and self._etat_recu(s, e))
             t2.lancer()
 
     def _cycle(self):
@@ -1596,19 +2079,25 @@ class Fenetre(QMainWindow):
         self.maj_zone()
         self._maj_barre()
 
-    def piloter(self, cle, valeur, camera=None):
-        if not self.pilotage_autorise or self.api is None:
-            return self.toast("Votre compte n'est pas autorisé à piloter Flux.", "erreur")
-
-        def fini(e):
-            self.etat_pilotage = e
-            self.detection_globale = e.get("detection", True)
-            if cle == "camera.clip":
-                self.toast("Vidéo demandée : elle est enregistrée sur le PC Flux.", "ok")
-            self.actualiser()
-        self.appeler(lambda: self.api.piloter(cle, valeur, camera), fini)
-        if cle != "camera.clip":
-            self.actualiser()
+    def piloter(self, cle, valeur, camera=None, srv=None, tous=False):
+        """Commande sur un PC Flux (`srv`, par défaut celui du contrôle) ; `tous` : sur tous les serveurs affichés que
+        le compte peut piloter (réglages généraux seulement)."""
+        srv = srv or self.srv_controle()
+        cibles = [srv] if srv is not None else []
+        if tous and camera is None:
+            cibles += [s for s in self._pilotables() if s is not srv]
+        cibles = [s for s in cibles if s.actif and s.pilotage_autorise]
+        if not cibles:
+            return self.toast("Votre compte n'est pas autorisé à piloter ce PC Flux.", "erreur")
+        for s in cibles:
+            def fini(e, s=s):
+                self._etat_recu(s, e)
+                if cle == "camera.clip":
+                    self.toast("Vidéo demandée : elle est enregistrée sur le PC Flux.", "ok")
+                self._actualiser_serveur(s)
+            self.appeler(lambda s=s: s.api.piloter(cle, valeur, camera), fini, srv=s)
+        if tous and len(cibles) > 1:
+            self.toast(f"Réglage envoyé à {len(cibles)} serveurs.", "ok")
 
     # --- navigation ------------------------------------------------------------------------------------
     def aller(self, cle):
@@ -1625,17 +2114,23 @@ class Fenetre(QMainWindow):
 
     def journal_camera(self, cam):
         self.aller("journal")
-        i = self.p_journal.combo_cam.findData(cam["id"])
+        j = self.p_journal
+        if self.plusieurs():
+            j.combo_srv.setCurrentIndex(0)
+        j.maj_cameras(forcer=True)
+        i = j.combo_cam.findData(cam["uid"])
         if i >= 0:
-            self.p_journal.combo_cam.setCurrentIndex(i)
+            j.combo_cam.setCurrentIndex(i)
 
     def ouvrir_video(self, cam):
-        v = self.videos.get(cam["id"])
+        v = self.videos.get(cam["uid"])
         if v is None:
             if cam["etat"] == "arret":
                 return self.toast(f"« {cam['nom']} » est arrêtée sur le PC Flux.")
+            if self.serveur_de(cam) is None or not self.serveur_de(cam).actif:
+                return self.toast("Ce PC Flux n'est plus connecté.")
             v = FenetreVideo(self, cam)
-            self.videos[cam["id"]] = v
+            self.videos[cam["uid"]] = v
         v.show()
         v.raise_()
         v.activateWindow()
@@ -1648,13 +2143,19 @@ class Fenetre(QMainWindow):
     def toast(self, texte, genre="info"):
         self.toasts.montrer(texte, genre)
 
+    def feedback(self):
+        from .feedback import DialogueFeedback
+        DialogueFeedback(self, VERSION).exec()
+
     # --- alertes sur ce PC ------------------------------------------------------------------------------------
-    def _alertes(self, evenements):
+    def _alertes(self, evenements, s):
         reg = self.reg
-        nouvelles = [e for e in evenements if e.get("niveau") == "alerte" or e.get("prioritaire")]
+        if s not in self.affiches():
+            return  # serveur masqué : pas d'alerte sur cet ordinateur
+        nouvelles = [self.enrichir(e, s) for e in evenements if e.get("niveau") == "alerte" or e.get("prioritaire")]
         if not nouvelles:
             return
-        self.dernieres_alertes = (list(reversed(nouvelles)) + self.dernieres_alertes)[:50]
+        self.dernieres_alertes = sorted(nouvelles + self.dernieres_alertes, key=lambda e: e["heure"], reverse=True)[:50]
         if self.pages_pile.currentWidget() is not self.p_journal:
             self._non_vues += len(nouvelles)
             self.nav["journal"].compteur = self._non_vues
@@ -1669,18 +2170,19 @@ class Fenetre(QMainWindow):
         muettes = set(reg["alertes.muettes"])
         maintenant = time.time()
         for e in nouvelles[-5:]:
-            cid = e.get("camera_id")
-            if cid in muettes and not e.get("prioritaire"):
+            uid = e["uid"]
+            if uid in muettes and not e.get("prioritaire"):
                 continue
             delai = reg["alertes.delai"] * 60
-            if delai and not e.get("prioritaire") and maintenant - self.derniers_envois.get(cid, 0) < delai:
-                self.retenues[cid] = self.retenues.get(cid, 0) + 1
+            if delai and not e.get("prioritaire") and maintenant - self.derniers_envois.get(uid, 0) < delai:
+                self.retenues[uid] = self.retenues.get(uid, 0) + 1
                 continue
-            self.derniers_envois[cid] = maintenant
-            n = self.retenues.pop(cid, 0)
-            titre = f"{'⚠ LISTE NOIRE · ' if e.get('prioritaire') else ''}{e['camera']}"
+            self.derniers_envois[uid] = maintenant
+            n = self.retenues.pop(uid, 0)
+            titre = (f"{'⚠ LISTE NOIRE · ' if e.get('prioritaire') else ''}{e['camera']}"
+                     + (f" · {s.nom}" if self.plusieurs() else ""))
             texte = e["texte"] + (f"  (+{n} pendant le délai)" if n else "")
-            self._derniere_alerte_cam = cid
+            self._derniere_alerte_uid = uid
             self.zone.showMessage(titre, texte, QSystemTrayIcon.MessageIcon.Warning if e.get("prioritaire")
                                   else QSystemTrayIcon.MessageIcon.Information, 8000)
             if mode == "sonores" or e.get("prioritaire"):
@@ -1688,7 +2190,7 @@ class Fenetre(QMainWindow):
 
     def _message_clique(self):
         self.montrer()
-        cam = next((c for c in self.cameras if c["id"] == self._derniere_alerte_cam), None)
+        cam = next((c for c in self.cameras if c["uid"] == self._derniere_alerte_uid), None)
         if cam and self.reg["alertes.ouvrir_camera"]:
             self.ouvrir_video(cam)
 
@@ -1704,9 +2206,9 @@ class Fenetre(QMainWindow):
         self._maj_barre()
         self.toast(f"Alertes de cet ordinateur en pause pendant {heures} h." if heures else "Alertes réactivées.", "ok")
 
-    def basculer_muette(self, cam_id):
+    def basculer_muette(self, uid):
         s = set(self.reg["alertes.muettes"])
-        s.symmetric_difference_update({cam_id})
+        s.symmetric_difference_update({uid})
         self.reg.set("alertes.muettes", sorted(s))
         self.p_cameras.rafraichir()
 
@@ -1802,8 +2304,9 @@ class Fenetre(QMainWindow):
         self._sauver_fenetre()
         for v in list(self.videos.values()):
             v.close()
-        if self.ecoute is not None:
-            self.ecoute.arreter()
+        for s in self.serveurs_actifs():
+            if s.ecoute is not None:
+                s.ecoute.arreter()
         self.zone.hide()
         QApplication.quit()
         if redemarrage:

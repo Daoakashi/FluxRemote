@@ -65,8 +65,13 @@ def articles_cgu(info):
                                  "vous opposer à leur traitement ou en demander la limitation. L'onglet Compte permet "
                                  f"d'exporter vos données et de supprimer votre compte. Pour le reste, adressez-vous au "
                                  f"responsable{contact}. Vous pouvez aussi saisir l'APD (Belgique) ou la CNIL (France)."),
-        ("9. Évolution", f"Ces conditions peuvent évoluer ; la nouvelle version devra être acceptée. Version "
-                         f"{module_api.VERSION_CGU}."),
+        ("9. Feedback", "Le bouton Feedback ouvre votre messagerie ou GitHub avec un message que vous relisez avant "
+                        "de l'envoyer ; rien n'est envoyé automatiquement. Il est adressé à l'éditeur (DMS Security), "
+                        "pas au responsable du serveur."),
+        ("10. Logiciel libre", "Flux Remote est un logiciel libre (GNU AGPL-3.0) fourni sans garantie, développé avec "
+                               "l'aide d'outils d'intelligence artificielle. Code source : github.com/Daoakashi."),
+        ("11. Évolution", f"Ces conditions peuvent évoluer ; la nouvelle version devra être acceptée. Version "
+                          f"{module_api.VERSION_CGU}."),
     ]
 
 
@@ -123,20 +128,34 @@ def entete(titre, sous_titre):
 
 
 class Accueil(QStackedWidget):
-    """Appairage › conditions › connexion. Émet `connecte` quand la session est ouverte."""
+    """Appairage › conditions › connexion d'un PC Flux. Émet `connecte` quand la session est ouverte, `annule`
+    quand la personne revient aux serveurs déjà reliés sans en ajouter."""
     connecte = Signal()
+    annule = Signal()
 
     def __init__(self, fen):
         super().__init__()
         self.fen, self.reg = fen, fen.reg
         self.info = None
+        self._annuler = []
         self.p_appairage = self._appairage()
         self.p_cgu = self._cgu()
         self.p_connexion = self._connexion()
         for p in (self.p_appairage, self.p_cgu, self.p_connexion):
             self.addWidget(p)
 
+    def _bouton_annuler(self, carte):
+        b = Bouton("Retour aux serveurs reliés", "fantome", "retour")
+        b.clicked.connect(self.annule.emit)
+        carte.v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        self._annuler.append(b)
+
     def montrer(self):
+        for b in self._annuler:
+            b.setVisible(bool(self.fen.serveurs_actifs()))
+        self.b_reutiliser.hide()
+        if not self.c_mail.text().strip():
+            self.c_mail.setText(self.fen.mail_connu())
         if not self.reg["cle"]:
             self.setCurrentWidget(self.p_appairage)
         elif self.reg["cgu"] != module_api.VERSION_CGU:
@@ -205,6 +224,7 @@ class Accueil(QStackedWidget):
                                     "site, partage de connexion), elle passe par Internet grâce au relais Flux, sans rien "
                                     "ouvrir dans la box. Dans les deux cas, images, alertes et commandes restent chiffrées "
                                     "de bout en bout entre ce PC et le PC Flux."))
+        self._bouton_annuler(carte)
         return centre(carte)
 
     def _lien_colle(self, texte):
@@ -281,6 +301,7 @@ class Accueil(QStackedWidget):
         b2 = Bouton("Changer de serveur", "fantome")
         b2.clicked.connect(self._changer_serveur)
         carte.v.addWidget(b2, 0, Qt.AlignmentFlag.AlignLeft)
+        self._bouton_annuler(carte)
         return centre(carte)
 
     def _accepter(self):
@@ -311,6 +332,12 @@ class Accueil(QStackedWidget):
         v1.addWidget(self.c_mdp)
         self.l_connexion = etiquette("")
         v1.addWidget(self.l_connexion)
+        self.b_reutiliser = Bouton("Créer mon compte sur ce serveur avec mes informations", "discret", "plus")
+        self.b_reutiliser.setToolTip("Mêmes nom, prénom, mail et société que sur vos autres serveurs Flux. Le responsable "
+                                     "de ce serveur valide le compte.")
+        self.b_reutiliser.clicked.connect(self._reutiliser)
+        self.b_reutiliser.hide()
+        v1.addWidget(self.b_reutiliser)
         self.b_connexion = Bouton("Se connecter", "primaire")
         self.b_connexion.clicked.connect(self._se_connecter)
         v1.addWidget(self.b_connexion)
@@ -359,6 +386,7 @@ class Accueil(QStackedWidget):
         b_serv = Bouton("Changer de serveur", "fantome", "reseau")
         b_serv.clicked.connect(self._changer_serveur)
         carte.v.addWidget(b_serv, 0, Qt.AlignmentFlag.AlignLeft)
+        self._bouton_annuler(carte)
         return centre(carte)
 
     def _maj_connexion(self):
@@ -399,10 +427,24 @@ class Accueil(QStackedWidget):
         def echec(msg):
             self.b_connexion.setEnabled(True)
             self._msg(self.l_connexion, msg, True)
+            # Pas encore de compte sur ce serveur ? On propose de le créer avec les informations déjà connues
+            if self.fen.profil_connu() and "incorrect" in msg.lower() and (self.info or {}).get("inscription", True):
+                self.b_reutiliser.show()
         t = Tache(self._appel, lambda: self.api().connecter(mail, mdp))
         t.fini.connect(fini)
         t.echec.connect(echec)
         t.lancer()
+
+    def _reutiliser(self):
+        p = self.fen.profil_connu()
+        self.i_prenom.setText(p.get("prenom", ""))
+        self.i_nom.setText(p.get("nom", ""))
+        self.i_mail.setText(self.c_mail.text().strip() or p.get("mail", ""))
+        self.i_societe.setText(p.get("societe") or p.get("entreprise") or "")
+        self.onglets.setCurrentIndex(1)
+        self._msg(self.l_inscription, "Vos informations sont reprises : choisissez le mot de passe pour ce serveur "
+                                      "(le même que d'habitude si vous voulez).")
+        self.i_mdp.setFocus()
 
     def _inscrire(self):
         p, n, m = self.i_prenom.text().strip(), self.i_nom.text().strip(), self.i_mail.text().strip()
