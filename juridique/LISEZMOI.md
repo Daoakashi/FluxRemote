@@ -24,3 +24,5 @@ Les autres textes juridiques sont rassemblés dans le dépôt de Flux, dossier [
 Bouton « Feedback » dans la barre de gauche :
 - par mail à dms.security.list@gmail.com ;
 - ou par un ticket sur https://github.com/Daoakashi/FluxRemote/issues.
+
+**Crédits.** Crédits : conception, choix des fonctions, tests et validation par DMS Security. Code et textes écrits en partie avec l'assistant d'IA Claude (Anthropic), qui cède à l'utilisateur ses droits éventuels sur ce qu'il produit. La licence AGPL-3.0 couvre l'apport humain ; les parties produites uniquement par l'IA peuvent ne pas être protégées par le droit d'auteur. Détail : `juridique/DECLARATION-IA.md` du dépôt Flux.

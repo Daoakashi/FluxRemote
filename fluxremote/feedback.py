@@ -79,3 +79,6 @@ class DialogueFeedback(QDialog):
         titre = urllib.parse.quote(f"[{self.sujet.currentText()}] ")
         QDesktopServices.openUrl(QUrl(f"{GITHUB}?title={titre}&body={urllib.parse.quote(self._corps())}"))
         self.accept()
+
+# Crédits affichés dans « À propos ».
+CREDITS_IA = ("Crédits : conception, choix des fonctions, tests et validation par DMS Security. Code et textes écrits en partie avec l'assistant d'IA Claude (Anthropic), qui cède à l'utilisateur ses droits éventuels sur ce qu'il produit. La licence AGPL-3.0 couvre l'apport humain ; les parties produites uniquement par l'IA peuvent ne pas être protégées par le droit d'auteur.")

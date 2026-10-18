@@ -28,6 +28,7 @@ from .theme import C, T, couleur, dessiner_logo
 from .version import SITE, VERSION
 from .video import LecteurFlux, VueImage, Vignettes
 from .widgets import Bouton, BoutonNav, Interrupteur, Logo, Toasts, Voyant, etiquette, ligne_option, separateur
+from .feedback import CREDITS_IA
 
 PAGES = [("tableau", "Tableau de bord", "accueil"), ("cameras", "Caméras", "cameras"),
          ("controle", "Contrôle", "controle"), ("journal", "Journal", "journal"), ("compte", "Compte", "personnes"),
@@ -1455,7 +1456,7 @@ class PageReglages(QWidget):
                               "LGPL v3) et cryptography (Apache 2.0) : détail dans LICENCES-TIERCES.md, à côté du "
                               "programme.\nFlux Remote a été conçu et développé avec l'aide d'outils d'intelligence "
                               "artificielle, sous la direction et la vérification de son auteur. Aucune image n'est "
-                              "envoyée à un service d'IA."))
+                              "envoyée à un service d'IA.\n" + CREDITS_IA))
         h = QHBoxLayout()
         b = Bouton("Feedback", "discret", "message")
         b.setToolTip("Envoyer une idée, un problème ou une question à l'éditeur de Flux")
