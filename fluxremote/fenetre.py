@@ -16,7 +16,8 @@ from PySide6.QtGui import QAction, QDesktopServices, QIcon, QKeySequence, QPaint
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
                                QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar, QScrollArea, QStackedWidget,
-                               QStatusBar, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
+                               QPushButton, QStatusBar, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTimeEdit,
+                               QVBoxLayout, QWidget)
 
 from . import api as module_api
 from . import maj, systeme, theme
@@ -714,6 +715,54 @@ class PageControle(QWidget):
         v.addWidget(ligne_option("Niveau de scan", self.combo_niveau))
         self.lbl_niveau = etiquette("")
         v.addWidget(self.lbl_niveau)
+        # Plage horaire (Flux 0.10.1 et plus)
+        self.bloc_horaire = QWidget()
+        bh = QVBoxLayout(self.bloc_horaire)
+        bh.setContentsMargins(0, 0, 0, 0)
+        bh.setSpacing(8)
+        bh.addWidget(separateur())
+        self.inter_horaire = Interrupteur()
+        self.inter_horaire.toggled.connect(lambda _e: self._envoyer_horaire())
+        bh.addWidget(ligne_option("Seulement pendant une plage horaire", self.inter_horaire,
+                                  "En dehors, les images restent visibles mais rien n'est analysé. Fin plus tôt que le "
+                                  "début = la nuit (22:00 → 06:00)."))
+        hh = QHBoxLayout()
+        hh.setSpacing(6)
+        hh.addWidget(QLabel("De"))
+        self.t_debut, self.t_fin = QTimeEdit(), QTimeEdit()
+        for t in (self.t_debut, self.t_fin):
+            t.setDisplayFormat("HH:mm")
+            t.setFixedWidth(84)
+            t.timeChanged.connect(lambda *_: setattr(self, "_horaire_modifie", True))
+        hh.addWidget(self.t_debut)
+        hh.addWidget(QLabel("à"))
+        hh.addWidget(self.t_fin)
+        hh.addStretch(1)
+        bh.addLayout(hh)
+        hj = QHBoxLayout()
+        hj.setSpacing(4)
+        self.b_jours = []
+        for nom in ("Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"):
+            b = QPushButton(nom)
+            b.setCheckable(True)
+            b.setObjectName("jour")
+            b.setFixedHeight(30)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.toggled.connect(lambda *_: setattr(self, "_horaire_modifie", True))
+            self.b_jours.append(b)
+            hj.addWidget(b)
+        hj.addStretch(1)
+        bh.addLayout(hj)
+        hb2 = QHBoxLayout()
+        self.b_horaire = Bouton("Enregistrer la plage", "primaire")
+        self.b_horaire.clicked.connect(lambda: self._envoyer_horaire(True))
+        hb2.addWidget(self.b_horaire)
+        hb2.addStretch(1)
+        bh.addLayout(hb2)
+        self.lbl_horaire = etiquette("")
+        bh.addWidget(self.lbl_horaire)
+        self._horaire_modifie = False
+        v.addWidget(self.bloc_horaire)
         v.addStretch(1)
         g.addWidget(f, 0, 0)
         f, v = carte("Délais", "Pour éviter d'être submergé : par caméra, les alertes pendant le délai sont regroupées.")
@@ -741,6 +790,20 @@ class PageControle(QWidget):
 
     def _global(self, cle, valeur):
         self.fen.piloter(cle, valeur, srv=self.fen.srv_controle(), tous=self.chk_tous.isChecked())
+
+    def _envoyer_horaire(self, forcer_actif=False):
+        jours = [i for i, b in enumerate(self.b_jours) if b.isChecked()]
+        if not jours:
+            self.fen.toast("Choisissez au moins un jour.", "erreur")
+            return
+        actif = True if forcer_actif else self.inter_horaire.isChecked()
+        if forcer_actif and not self.inter_horaire.isChecked():
+            self.inter_horaire.blockSignals(True)
+            self.inter_horaire.regler(True)
+            self.inter_horaire.blockSignals(False)
+        self._horaire_modifie = False
+        self._global("horaire", {"actif": actif, "debut": self.t_debut.time().toString("HH:mm"),
+                                 "fin": self.t_fin.time().toString("HH:mm"), "jours": jours})
 
     def _delai(self, cle, w):
         e = (self.fen.srv_controle() or Serveur({"cle": ""})).etat_pilotage or {}
@@ -781,6 +844,25 @@ class PageControle(QWidget):
         if i >= 0 and not self.combo_niveau.view().isVisible():
             self.combo_niveau.setCurrentIndex(i)
             self.lbl_niveau.setText(e["niveaux"][i]["texte"])
+        h = e.get("horaire")
+        self.bloc_horaire.setVisible(bool(h))
+        if h:
+            if not self._horaire_modifie and not (self.t_debut.hasFocus() or self.t_fin.hasFocus()):
+                from PySide6.QtCore import QTime
+                widgets = [self.inter_horaire, self.t_debut, self.t_fin, *self.b_jours]
+                for w in widgets:
+                    w.blockSignals(True)
+                self.inter_horaire.regler(bool(h.get("actif")))
+                self.t_debut.setTime(QTime.fromString(h.get("debut", "06:00"), "HH:mm"))
+                self.t_fin.setTime(QTime.fromString(h.get("fin", "22:00"), "HH:mm"))
+                for i, b in enumerate(self.b_jours):
+                    b.setChecked(i in h.get("jours", []))
+                for w in widgets:
+                    w.blockSignals(False)
+            self.lbl_horaire.setText(((e.get("horaire_texte") or "") + (
+                " — en ce moment : hors plage, détection en pause." if e.get("hors_plage") else
+                " — en ce moment : détection active.")) if h.get("actif") else
+                "Désactivée : la détection tourne à toute heure.")
         for cle, s in self.delais.items():
             if not s.hasFocus():
                 s.blockSignals(True)

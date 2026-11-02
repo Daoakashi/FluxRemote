@@ -123,18 +123,23 @@ def feuille_de_style():
     QFrame#sep {{ background: {C['trait']}; max-height: 1px; min-height: 1px; border: none; }}
     QScrollArea {{ background: transparent; border: none; }}
     QScrollArea > QWidget > QWidget {{ background: transparent; }}
-    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QPlainTextEdit, QTextEdit {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit, QPlainTextEdit, QTextEdit {{
         background: {C['surface']}; border: 1px solid {C['trait']}; border-radius: {max(4, r - 1)}px;
         padding: {pv}px {ph}px; selection-background-color: {C['accent']}; selection-color: {C['accent_texte']}; }}
-    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {{ min-height: {int(22 * d)}px; }}
-    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QPlainTextEdit:focus {{
+    QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTimeEdit {{ min-height: {int(22 * d)}px; }}
+    QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus, QTimeEdit:focus, QPlainTextEdit:focus {{
         border-color: {C['accent']}; }}
     QLineEdit:disabled, QComboBox:disabled {{ color: {C['texte3']}; }}
     QComboBox::drop-down {{ border: none; width: 24px; }}
     QComboBox::down-arrow {{ image: url("{T.fleche}"); width: 10px; height: 10px; margin-right: 8px; }}
     QComboBox QAbstractItemView {{ background: {C['surface']}; border: 1px solid {C['trait']}; padding: 4px;
         selection-background-color: {C['selection']}; selection-color: {C['texte']}; outline: 0; }}
-    QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {{ width: 0; }}
+    QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+        QTimeEdit::up-button, QTimeEdit::down-button {{ width: 0; }}
+    QPushButton#jour {{ background: {C['surface']}; border: 1px solid {C['trait']}; border-radius: 15px; padding: 0 10px;
+        color: {C['texte2']}; font-weight: 600; min-width: 34px; }}
+    QPushButton#jour:hover {{ border-color: {C['texte3']}; color: {C['texte']}; }}
+    QPushButton#jour:checked {{ background: {C['accent']}; border-color: {C['accent']}; color: {C['accent_texte']}; }}
     QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
     QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
     QScrollBar::handle {{ background: {C['trait']}; border-radius: 4px; min-height: 28px; min-width: 28px; }}
