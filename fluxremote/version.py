@@ -1,4 +1,4 @@
 """Version de Flux Remote. À augmenter avant chaque publication (onglet Actions › Publier Flux Remote)."""
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 SITE = "https://daoakashi.github.io/flux-web"
 URL_MAJ = SITE + "/remote/version.json"

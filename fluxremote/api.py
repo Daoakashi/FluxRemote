@@ -89,7 +89,11 @@ def cle_du_certificat(der):
 
 
 def lire_adresse_relais(texte, port_defaut=PORT_RELAIS):
-    """« relais.exemple.be », « relais.exemple.be:8443 », « [2001:db8::1]:443 » -> (hôte, port) ou None."""
+    """« relais.exemple.be », « relais.exemple.be:8443 », « [2001:db8::1]:443 » -> (hôte, port) ou None.
+    « wss://… » (relais du serveur Flux sur Cloudflare) -> AdresseWs, jointe en WebSocket."""
+    from .pont_ws import lire_adresse_ws
+    if str(texte or "").strip().lower().startswith(("wss://", "ws://")):
+        return lire_adresse_ws(texte)
     t = str(texte or "").strip()
     for prefixe in ("https://", "http://", "fluxrelais://"):
         if t.lower().startswith(prefixe):
@@ -116,6 +120,8 @@ def lire_adresse_relais(texte, port_defaut=PORT_RELAIS):
 def texte_relais(adresse):
     if not adresse:
         return ""
+    if getattr(adresse, "ws", False):
+        return adresse.texte()
     hote, port = adresse
     hote = f"[{hote}]" if ":" in hote else hote
     return hote if port == PORT_RELAIS else f"{hote}:{port}"
@@ -145,8 +151,10 @@ def charger_relais_site(delai=12):
             d = json.loads(r.read(65536).decode("utf-8"))
     except Exception:  # noqa: BLE001 - hors ligne : on garde la dernière adresse connue
         return None
-    adresse = lire_adresse_relais(d.get("hote") or "", d.get("port") or PORT_RELAIS) \
-        if isinstance(d, dict) and d.get("actif", True) else None
+    adresse = None
+    if isinstance(d, dict) and d.get("actif", True):
+        adresse = lire_adresse_relais(d.get("url") or "") or \
+            lire_adresse_relais(d.get("hote") or "", d.get("port") or PORT_RELAIS)
     _relais["site"] = adresse
     return texte_relais(adresse)
 
@@ -165,7 +173,11 @@ def _lire_ligne(sock, maximum=4096):
 
 def socket_relais(adresse, cle, delai=12):
     """Connexion au PC Flux au travers du relais : renvoie une socket prête pour la poignée de main TLS."""
-    s = socket.create_connection(adresse, timeout=delai)
+    if getattr(adresse, "ws", False):  # relais du serveur Flux (Cloudflare) : WebSocket vue comme une socket
+        from . import pont_ws
+        s = pont_ws.ouvrir(adresse, cle, delai=delai)
+    else:
+        s = socket.create_connection(adresse, timeout=delai)
     try:
         s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         s.sendall(f"{PROTOCOLE_RELAIS} CLIENT {cle}\n".encode())
@@ -213,7 +225,7 @@ def lire_lien(texte):
 
 
 def relais_du_lien(texte):
-    """Relais indiqué dans le lien d'appairage (seulement quand le PC Flux utilise son propre relais)."""
+    """Relais indiqué dans le lien d'appairage (relais choisi par le PC Flux, ou celui de son serveur Flux)."""
     try:
         q = urllib.parse.parse_qs(urllib.parse.urlsplit(texte.strip()).query)
         return texte_relais(lire_adresse_relais(q.get("r", [""])[0]))
